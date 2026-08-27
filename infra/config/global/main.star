@@ -1,15 +1,19 @@
 #!/usr/bin/env lucicfg
+# Copyright 2021 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
 """
 Open Screen's LUCI configuration for post-submit and pre-submit builders.
 """
 
 REPO_URL = "https://chromium.googlesource.com/openscreen"
 CHROMIUM_REPO_URL = "https://chromium.googlesource.com/chromium/src"
-MAC_VERSION = "Mac-13"
+MAC_VERSION = "Mac-15"
 WINDOWS_VERSION = "Windows-10"
+LINUX_VERSION = "Ubuntu-24.04"
 REF = "refs/heads/main"
 
-RECLIENT_PROPERTY = "$build/reclient"
+SISO_PROPERTY = "$build/siso"
 
 # Use LUCI Scheduler BBv2 names and add Scheduler realms configs.
 lucicfg.enable_experiment("crbug.com/1182002")
@@ -51,8 +55,10 @@ luci.project(
 )
 
 luci.milo(
-    logo = ("https://storage.googleapis.com/chrome-infra-public/logo/" +
-            "openscreen-logo.png"),
+    logo = (
+        "https://storage.googleapis.com/chrome-infra-public/logo/" +
+        "openscreen-logo.png"
+    ),
 )
 
 luci.logdog(gs_bucket = "chromium-luci-logdog")
@@ -92,6 +98,27 @@ luci.bucket(
     ],
 )
 luci.bucket(
+    name = "try.shadow",
+    shadows = "try",
+    constraints = luci.bucket_constraints(
+        pools = ["luci.flex.try"],
+        service_accounts = [
+            "openscreen-try-builder@chops-service-accounts.iam.gserviceaccount.com",
+        ],
+    ),
+    bindings = [
+        # For led permissions.
+        luci.binding(
+            roles = "role/buildbucket.creator",
+            groups = [
+                "mdb/chrome-build-access-sphinx",
+                "project-openscreen-tryjob-access",
+            ],
+        ),
+    ],
+    dynamic = True,
+)
+luci.bucket(
     name = "ci",
     acls = [
         acl.entry(
@@ -99,6 +126,27 @@ luci.bucket(
             users = "luci-scheduler@appspot.gserviceaccount.com",
         ),
     ],
+)
+luci.bucket(
+    name = "ci.shadow",
+    shadows = "ci",
+    constraints = luci.bucket_constraints(
+        pools = ["luci.flex.ci"],
+        service_accounts = [
+            "openscreen-ci-builder@chops-service-accounts.iam.gserviceaccount.com",
+        ],
+    ),
+    bindings = [
+        # For led permissions.
+        luci.binding(
+            roles = "role/buildbucket.creator",
+            groups = [
+                "mdb/chrome-build-access-sphinx",
+                "project-openscreen-tryjob-access",
+            ],
+        ),
+    ],
+    dynamic = True,
 )
 
 luci.console_view(
@@ -112,21 +160,21 @@ luci.console_view(
     repo = REPO_URL,
 )
 
-_reclient = struct(
-    instance = struct(
+_siso = struct(
+    project = struct(
         DEFAULT_TRUSTED = "rbe-chromium-trusted",
         DEFAULT_UNTRUSTED = "rbe-chromium-untrusted",
     ),
 )
 
 def get_properties(
+        target_cpu,
         is_debug = True,
         is_gcc = False,
         is_asan = False,
         is_tsan = False,
         is_msan = False,
         use_coverage = False,
-        target_cpu = "x64",
         cast_receiver = False,
         chromium = False,
         is_presubmit = False,
@@ -135,14 +183,14 @@ def get_properties(
     """Property generator method, used to configure the build system.
 
     Args:
+      target_cpu: the target CPU. May differ from current_cpu or host_cpu
+        if cross compiling.
       is_debug: if False, the build mode is release instead of debug.
       is_gcc: if True, the GCC compiler is used instead of clang.
       is_asan: if True, this is an address sanitizer build.
       is_msan: if True, this is a memory sanitizer build.
       is_tsan: if True, this is a thread sanitizer build.
       use_coverage: if True, this is a code coverage build.
-      target_cpu: the target CPU. May differ from current_cpu or host_cpu
-        if cross compiling.
       cast_receiver: if True, this build should include the cast standalone
         sender and receiver binaries.
       chromium: if True, the build is for use in an embedder, such as Chrome.
@@ -165,6 +213,7 @@ def get_properties(
     if is_gcc:
         properties["is_clang"] = False
         properties["use_custom_libcxx"] = False
+        properties["enable_rust"] = False
     if is_asan:
         properties["is_asan"] = True
     if is_msan:
@@ -174,16 +223,20 @@ def get_properties(
     if use_coverage:
         properties["use_coverage"] = True
     if cast_receiver:
-        properties["have_ffmpeg"] = True
-        properties["have_libsdl2"] = True
+        # TODO(crbug.com/337080120): enable receiver-side dependencies.
+        # properties["have_ffmpeg"] = True
+        # properties["have_libsdl2"] = True
         properties["have_libopus"] = True
         properties["have_libvpx"] = True
     if chromium:
         properties["builder_group"] = "client.openscreen.chromium"
-        properties[RECLIENT_PROPERTY] = {
-            "instance": _reclient.instance.DEFAULT_UNTRUSTED,
-            "metrics_project": "chromium-reclient-metrics",
-            "scandeps_server": True,
+        properties["clang_use_chrome_plugins"] = True
+        properties[SISO_PROPERTY] = {
+            "configs": ["builder"],
+            "enable_cloud_monitoring": True,
+            "enable_cloud_profiler": True,
+            "enable_cloud_trace": True,
+            "project": _siso.project.DEFAULT_UNTRUSTED,
         }
 
     if is_presubmit:
@@ -197,18 +250,17 @@ def get_properties(
         properties["is_ci"] = is_ci
     return properties
 
-def builder(builder_type, name, properties, os, cpu):
+def builder(builder_type, name, os, cpu, properties):
     """Defines a builder.
 
     Args:
       builder_type: "ci" or "try".
       name: name of the builder to define.
-      properties: configuration to be passed to GN.
       os: the target operating system.
       cpu: the target architecture, such as "arm64."
+      properties: configuration to be passed to GN.
     """
     recipe_id = "openscreen"
-    use_python3 = True
     if properties:
         if "builder_group" in properties:
             recipe_id = "chromium"
@@ -221,7 +273,11 @@ def builder(builder_type, name, properties, os, cpu):
 
     triggers = None
     if builder_type == "ci":
-        triggers = ["chromium-trigger" if recipe_id == "chromium" else "main-gitiles-trigger"]
+        triggers = [
+            (
+                "chromium-trigger" if recipe_id == "chromium" else "main-gitiles-trigger"
+            ),
+        ]
 
     luci.builder(
         name = name,
@@ -229,11 +285,9 @@ def builder(builder_type, name, properties, os, cpu):
         executable = luci.recipe(
             name = recipe_id,
             recipe = recipe_id,
-            cipd_package =
-                "infra/recipe_bundles/chromium.googlesource.com/chromium/tools/build",
+            cipd_package = "infra/recipe_bundles/chromium.googlesource.com/chromium/tools/build",
             cipd_version = "refs/heads/main",
             use_bbagent = True,
-            use_python3 = use_python3,
         ),
         dimensions = {
             "pool": "luci.flex." + builder_type,
@@ -242,13 +296,13 @@ def builder(builder_type, name, properties, os, cpu):
         },
         caches = caches,
         properties = properties,
-        service_account =
-            "openscreen-{}-builder@chops-service-accounts.iam.gserviceaccount.com"
-                .format(builder_type),
+        service_account = "openscreen-{}-builder@chops-service-accounts.iam.gserviceaccount.com".format(
+            builder_type,
+        ),
         triggered_by = triggers,
     )
 
-    # CI jobs get triggered by |triggers|, try jobs get trigged by the commit
+    # CI jobs get triggered by |triggers|, try jobs get triggered by the commit
     # queue instead.
     if builder_type == "try":
         # We mark some bots as experimental to not block the build.
@@ -275,46 +329,45 @@ def builder(builder_type, name, properties, os, cpu):
         short_name = name,
     )
 
-def ci_builder(name, properties, os = "Ubuntu-22.04", cpu = "x86-64"):
+def ci_builder(name, os, cpu, properties):
     """Defines a post submit builder.
 
-       Args:
-        name: name of the builder to define.
-        properties: configuration to be passed to GN.
-        os: the target operating system.
-        cpu: the target central processing unit.
+    Args:
+     name: name of the builder to define.
+     os: the target operating system.
+     cpu: the target central processing unit.
+     properties: configuration to be passed to GN.
     """
-    builder("ci", name, properties, os, cpu)
+    builder("ci", name, os, cpu, properties)
 
-def try_builder(name, properties, os = "Ubuntu-22.04", cpu = "x86-64"):
+def try_builder(name, os, cpu, properties):
     """Defines a pre submit builder.
 
     Args:
       name: name of the builder to define.
-      properties: configuration to be passed to GN.
       os: the target operating system.
       cpu: the target central processing unit.
+      properties: configuration to be passed to GN.
     """
-    builder("try", name, properties, os, cpu)
+    builder("try", name, os, cpu, properties)
 
-def try_and_ci_builders(name, properties, os = "Ubuntu-22.04", cpu = "x86-64"):
+def try_and_ci_builders(name, os, cpu, properties):
     """Defines a similarly configured try and ci builder pair.
 
     Args:
       name: name of the builder to define.
-      properties: configuration to be passed to GN.
       os: the target operating system.
       cpu: the target central processing unit.
+      properties: configuration to be passed to GN.
     """
-    try_builder(name, properties, os, cpu)
+    try_builder(name, os, cpu, properties)
 
     ci_properties = dict(properties)
     ci_properties["is_ci"] = True
-    RECLIENT_PROPERTY = "$build/reclient"
-    if RECLIENT_PROPERTY in ci_properties:
-        ci_properties[RECLIENT_PROPERTY] = dict(ci_properties[RECLIENT_PROPERTY])
-        ci_properties[RECLIENT_PROPERTY]["instance"] = _reclient.instance.DEFAULT_TRUSTED
-    ci_builder(name, ci_properties, os, cpu)
+    if SISO_PROPERTY in ci_properties:
+        ci_properties[SISO_PROPERTY] = dict(ci_properties[SISO_PROPERTY])
+        ci_properties[SISO_PROPERTY]["project"] = _siso.project.DEFAULT_TRUSTED
+    ci_builder(name, os, cpu, ci_properties)
 
 # BUILDER CONFIGURATIONS
 # Follow the pattern: <platform>_<arch>
@@ -323,47 +376,76 @@ def try_and_ci_builders(name, properties, os = "Ubuntu-22.04", cpu = "x86-64"):
 
 try_builder(
     "openscreen_presubmit",
-    get_properties(is_presubmit = True, is_debug = False),
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", is_presubmit = True, is_debug = False),
 )
 try_and_ci_builders(
     "linux_arm64_cast_receiver",
-    get_properties(cast_receiver = True, target_cpu = "arm64", is_component_build = False),
+    LINUX_VERSION,
+    # This bot relies on cross-compilation.
+    "x86-64",
+    get_properties("arm64", cast_receiver = True, is_component_build = False),
 )
-try_and_ci_builders("linux_x64_coverage", get_properties(use_coverage = True))
-try_and_ci_builders("linux_x64", get_properties(is_asan = True))
+try_and_ci_builders(
+    "linux_x64_coverage",
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", use_coverage = True),
+)
+try_and_ci_builders(
+    "linux_x64",
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", is_asan = True),
+)
 try_and_ci_builders(
     "linux_x64_gcc",
-    get_properties(is_gcc = True),
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", is_gcc = True),
 )
 try_and_ci_builders(
     "linux_x64_msan_rel",
-    get_properties(is_debug = False, is_msan = True),
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", is_debug = False, is_msan = True),
 )
 try_and_ci_builders(
     "linux_x64_tsan_rel",
-    get_properties(is_debug = False, is_tsan = True),
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", is_debug = False, is_tsan = True),
 )
 try_and_ci_builders(
     "linux_arm64",
-    get_properties(target_cpu = "arm64", is_component_build = False),
+    LINUX_VERSION,
+    # This bot relies on cross-compilation.
+    "x86-64",
+    get_properties("arm64", is_component_build = False),
 )
-try_and_ci_builders("mac_x64", get_properties(), os = MAC_VERSION)
+try_and_ci_builders("mac_arm64", MAC_VERSION, "arm64", get_properties("arm64"))
 try_and_ci_builders(
     "win_x64",
-    get_properties(),
-    os = WINDOWS_VERSION,
+    WINDOWS_VERSION,
+    "x86-64",
+    get_properties("x64"),
 )
 try_and_ci_builders(
     "chromium_linux_x64",
-    get_properties(chromium = True),
+    LINUX_VERSION,
+    "x86-64",
+    get_properties("x64", chromium = True),
 )
 try_and_ci_builders(
-    "chromium_mac_x64",
-    get_properties(chromium = True),
-    os = MAC_VERSION,
+    "chromium_mac_arm64",
+    MAC_VERSION,
+    "arm64",
+    get_properties("arm64", chromium = True),
 )
 try_and_ci_builders(
     "chromium_win_x64",
-    get_properties(chromium = True),
-    os = WINDOWS_VERSION,
+    WINDOWS_VERSION,
+    "x86-64",
+    get_properties("x64", chromium = True),
 )

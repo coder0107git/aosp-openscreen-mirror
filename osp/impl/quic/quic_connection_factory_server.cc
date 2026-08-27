@@ -9,13 +9,13 @@
 #include <vector>
 
 #include "osp/impl/quic/open_screen_server_session.h"
-#include "osp/impl/quic/quic_alarm_factory_impl.h"
-#include "osp/impl/quic/quic_constants.h"
 #include "osp/impl/quic/quic_dispatcher_impl.h"
-#include "osp/impl/quic/quic_packet_writer_impl.h"
 #include "osp/impl/quic/quic_server.h"
-#include "osp/impl/quic/quic_utils.h"
 #include "osp/impl/quic/quic_version_manager.h"
+#include "platform/impl/quic/quic_alarm_factory_impl.h"
+#include "platform/impl/quic/quic_constants.h"
+#include "platform/impl/quic/quic_packet_writer_impl.h"
+#include "platform/impl/quic/quic_utils.h"
 #include "quiche/quic/core/quic_default_connection_helper.h"
 #include "util/osp_logging.h"
 #include "util/std_util.h"
@@ -32,10 +32,21 @@ QuicConnectionFactoryServer::QuicConnectionFactoryServer(
 
 QuicConnectionFactoryServer::~QuicConnectionFactoryServer() = default;
 
+void QuicConnectionFactoryServer::Shutdown() {
+  server_delegate_ = nullptr;
+  dispatchers_.clear();
+  crypto_server_config_.reset();
+}
+
 void QuicConnectionFactoryServer::SetServerDelegate(
     ServerDelegate* delegate,
     const std::vector<IPEndpoint>& endpoints) {
   OSP_CHECK(!delegate != !server_delegate_);
+
+  if (!delegate) {
+    Shutdown();
+    return;
+  }
 
   server_delegate_ = delegate;
   dispatchers_.reserve(dispatchers_.size() + endpoints.size());
@@ -50,7 +61,7 @@ void QuicConnectionFactoryServer::SetServerDelegate(
     // create/bind errors occur. Maybe return an Error immediately, and undo
     // partial progress (i.e. "unwatch" all the sockets and call
     // dispatchers_.clear() to close the sockets)?
-    auto create_result = UdpSocket::Create(task_runner_, this, endpoint);
+    auto create_result = UdpSocket::Create(*task_runner_, this, endpoint);
     if (!create_result) {
       OSP_LOG_ERROR << "failed to create socket (for " << endpoint
                     << "): " << create_result.error().message();
@@ -64,7 +75,7 @@ void QuicConnectionFactoryServer::SetServerDelegate(
     auto dispatcher = std::make_unique<QuicDispatcherImpl>(
         &config_, crypto_server_config_.get(), std::move(version_manager),
         std::make_unique<quic::QuicDefaultConnectionHelper>(),
-        std::make_unique<QuicAlarmFactoryImpl>(task_runner_,
+        std::make_unique<QuicAlarmFactoryImpl>(*task_runner_,
                                                quic::QuicDefaultClock::Get()),
         /*expected_server_connection_id_length=*/0u, connection_id_generator_,
         *this);

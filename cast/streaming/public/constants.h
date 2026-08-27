@@ -48,6 +48,9 @@ inline constexpr int kMaxUnackedFrames = 120;
 // The network must support a packet size of at least this many bytes.
 inline constexpr int kRequiredNetworkPacketSize = 256;
 
+// 1 kilobyte in bytes.
+inline constexpr int kBytesPerKilobyte = 1024;
+
 // The spec declares RTP timestamps must always have a timebase of 90000 ticks
 // per second for video.
 inline constexpr int kRtpVideoTimebase = 90000;
@@ -96,6 +99,9 @@ inline constexpr std::chrono::milliseconds kDefaultMaxDelayMs(1500);
 // to 3.
 inline constexpr int kSupportedRemotingVersion = 2;
 
+// Used for RTCP message support.
+constexpr uint32_t kCastName = ('C' << 24) + ('A' << 16) + ('S' << 8) + 'T';
+
 // Codecs known and understood by cast senders and receivers. Note: receivers
 // are required to implement the following codecs to be Cast V2 compliant: H264,
 // VP8, AAC, Opus. Senders have to implement at least one codec from this
@@ -113,6 +119,8 @@ enum class StreamType { kUnknown, kAudio, kVideo };
 
 enum class CastMode : uint8_t { kMirroring, kRemoting };
 std::ostream& operator<<(std::ostream& os, CastMode mode);
+
+enum class DataTransportProtocol { kUnknown, kWebTransport };
 
 }  // namespace openscreen::cast
 

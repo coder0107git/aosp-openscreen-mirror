@@ -15,7 +15,6 @@
 #include "platform/base/span.h"
 
 using testing::_;
-using testing::Invoke;
 using testing::Return;
 
 namespace openscreen::cast {
@@ -77,7 +76,7 @@ class RpcMessengerTest : public testing::Test {
   void ProcessMessage(const RpcMessage& rpc) {
     std::vector<uint8_t> message(rpc.ByteSizeLong());
     rpc.SerializeToArray(message.data(), message.size());
-    rpc_messenger_->ProcessMessageFromRemote(message.data(), message.size());
+    rpc_messenger_->ProcessMessageFromRemote(message);
   }
 
   std::unique_ptr<FakeMessenger> fake_messenger_;

@@ -8,7 +8,6 @@
 #include <atomic>
 #include <memory>
 
-#include "platform/base/macros.h"
 #include "platform/base/span.h"
 
 namespace openscreen {
@@ -20,6 +19,10 @@ namespace openscreen {
 class TlsWriteBuffer {
  public:
   TlsWriteBuffer();
+  TlsWriteBuffer(const TlsWriteBuffer&) = delete;
+  TlsWriteBuffer(TlsWriteBuffer&&) noexcept = delete;
+  TlsWriteBuffer& operator=(const TlsWriteBuffer&) = delete;
+  TlsWriteBuffer& operator=(TlsWriteBuffer&&) = delete;
   ~TlsWriteBuffer();
 
   // Pushes the provided data into the buffer, returning true if successful.
@@ -29,7 +32,7 @@ class TlsWriteBuffer {
 
   // Returns a subset of the readable region of data. At time of reading, more
   // data may be available for reading than what is represented in this Span.
-  ByteView GetReadableRegion();
+  ByteView GetReadableRegion() const;
 
   // Marks the provided number of bytes as consumed by the consumer thread.
   void Consume(size_t byte_count);
@@ -47,8 +50,6 @@ class TlsWriteBuffer {
   // each CPU's physical cache.
   std::atomic_size_t bytes_read_so_far_{0};
   std::atomic_size_t bytes_written_so_far_{0};
-
-  OSP_DISALLOW_COPY_AND_ASSIGN(TlsWriteBuffer);
 };
 
 }  // namespace openscreen

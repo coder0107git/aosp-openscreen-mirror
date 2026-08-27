@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "osp/impl/quic/quic_connection_impl.h"
-#include "osp/impl/quic/quic_constants.h"
 #include "osp/impl/quic/quic_stream_impl.h"
+#include "platform/impl/quic/quic_constants.h"
 #include "quiche/quic/core/quic_constants.h"
 #include "util/osp_logging.h"
 
@@ -36,7 +36,7 @@ OpenScreenSessionBase::OpenScreenSessionBase(
                                 quic::kMaxAvailableStreamsMultiplier) -
                                1;
   this->config()->SetMaxBidirectionalStreamsToSend(max_streams);
-  if (VersionHasIetfQuicFrames(transport_version())) {
+  if (VersionIsIetfQuic(transport_version())) {
     this->config()->SetMaxUnidirectionalStreamsToSend(max_streams);
   }
 }
@@ -50,16 +50,15 @@ void OpenScreenSessionBase::Initialize() {
 
 void OpenScreenSessionBase::OnTlsHandshakeComplete() {
   QuicSession::OnTlsHandshakeComplete();
-  visitor_.OnCryptoHandshakeComplete();
+  visitor_->OnCryptoHandshakeComplete();
 }
 
 std::vector<std::string> OpenScreenSessionBase::GetAlpnsToOffer() const {
   return std::vector<std::string>({kOpenScreenProtocolALPN});
 }
 
-std::vector<absl::string_view>::const_iterator
-OpenScreenSessionBase::SelectAlpn(
-    const std::vector<absl::string_view>& alpns) const {
+std::vector<std::string_view>::const_iterator OpenScreenSessionBase::SelectAlpn(
+    const std::vector<std::string_view>& alpns) const {
   return std::find(alpns.cbegin(), alpns.cend(), kOpenScreenProtocolALPN);
 }
 
@@ -81,18 +80,13 @@ quic::QuicStream* OpenScreenSessionBase::CreateIncomingStream(
   OSP_CHECK(connection()->connected());
 
   auto stream = std::make_unique<QuicStreamImpl>(
-      visitor_.GetConnectionDelegate().GetStreamDelegate(
-          visitor_.GetInstanceID()),
+      visitor_->GetConnectionDelegate().GetStreamDelegate(
+          visitor_->GetInstanceID()),
       id, this, quic::READ_UNIDIRECTIONAL);
   auto* stream_ptr = stream.get();
   ActivateStream(std::move(stream));
-  visitor_.OnIncomingStream(stream_ptr);
+  visitor_->OnIncomingStream(stream_ptr);
   return stream_ptr;
-}
-
-quic::QuicStream* OpenScreenSessionBase::CreateIncomingStream(
-    quic::PendingStream* /*pending*/) {
-  OSP_NOTREACHED();
 }
 
 bool OpenScreenSessionBase::ShouldKeepConnectionAlive() const {

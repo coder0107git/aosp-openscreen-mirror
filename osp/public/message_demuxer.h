@@ -13,6 +13,7 @@
 #include "platform/api/time.h"
 #include "platform/base/error.h"
 #include "platform/base/span.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::osp {
 
@@ -66,7 +67,7 @@ class MessageDemuxer {
     // no-op.
     void StopWatching();
 
-    MessageDemuxer* parent_ = nullptr;
+    raw_ptr<MessageDemuxer> parent_ = nullptr;
     bool is_default_ = false;
     uint64_t instance_id_ = 0u;
     msgs::Type message_type_ = msgs::Type::kUnknown;
@@ -114,20 +115,22 @@ class MessageDemuxer {
   HandleStreamBufferResult HandleStreamBufferLoop(
       uint64_t instance_id,
       uint64_t connection_id,
-      std::map<uint64_t, std::map<msgs::Type, MessageCallback*>>::iterator
+      std::map<uint64_t,
+               std::map<msgs::Type, raw_ptr<MessageCallback>>>::iterator
           instance_entry,
       std::vector<uint8_t>& buffer);
 
   HandleStreamBufferResult HandleStreamBuffer(
       uint64_t instance_id,
       uint64_t connection_id,
-      std::map<msgs::Type, MessageCallback*>* message_callbacks,
+      std::map<msgs::Type, raw_ptr<MessageCallback>>* message_callbacks,
       std::vector<uint8_t>& buffer);
 
   const ClockNowFunctionPtr now_function_;
   const size_t buffer_limit_;
-  std::map<uint64_t, std::map<msgs::Type, MessageCallback*>> message_callbacks_;
-  std::map<msgs::Type, MessageCallback*> default_callbacks_;
+  std::map<uint64_t, std::map<msgs::Type, raw_ptr<MessageCallback>>>
+      message_callbacks_;
+  std::map<msgs::Type, raw_ptr<MessageCallback>> default_callbacks_;
 
   // Map<instance_id, Map<connection_id, data_buffer>>
   std::map<uint64_t, std::map<uint64_t, std::vector<uint8_t>>> buffers_;

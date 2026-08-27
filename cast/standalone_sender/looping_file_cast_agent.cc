@@ -4,6 +4,7 @@
 
 #include "cast/standalone_sender/looping_file_cast_agent.h"
 
+#include <format>
 #include <optional>
 #include <string>
 #include <utility>
@@ -12,14 +13,12 @@
 #include "build/build_config.h"
 #include "cast/common/channel/message_util.h"
 #include "cast/common/public/cast_streaming_app_ids.h"
-#include "cast/standalone_sender/looping_file_sender.h"
 #include "cast/streaming/public/capture_recommendations.h"
 #include "cast/streaming/public/constants.h"
 #include "cast/streaming/public/offer_messages.h"
 #include "json/value.h"
 #include "platform/api/tls_connection_factory.h"
 #include "util/json/json_helpers.h"
-#include "util/stringprintf.h"
 #include "util/trace_logging.h"
 
 namespace openscreen::cast {
@@ -42,13 +41,16 @@ LoopingFileCastAgent::LoopingFileCastAgent(
                       CastCRLTrustStore::Create()),
       connection_factory_(
           TlsConnectionFactory::CreateFactory(socket_factory_, task_runner_)),
-      message_port_(router_) {
+      message_port_(router_),
+      stop_ack_timeout_(&Clock::now, task_runner_) {
   router_.AddHandlerForLocalId(kPlatformSenderId, this);
   socket_factory_.set_factory(connection_factory_.get());
 }
 
 LoopingFileCastAgent::~LoopingFileCastAgent() {
-  Shutdown();
+  // Best-effort: if a session is active, make one immediate attempt to tell
+  // the receiver to stop it, but don't wait around for confirmation.
+  RequestStop();
 }
 
 void LoopingFileCastAgent::Connect(ConnectionSettings settings) {
@@ -61,9 +63,9 @@ void LoopingFileCastAgent::Connect(ConnectionSettings settings) {
                           : DeviceMediaPolicy::kAudioOnly;
 
   task_runner_.PostTask([this, policy] {
-#if BUILDFLAG(IS_APPLE)
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX)
     wake_lock_ = ScopedWakeLock::Create(task_runner_);
-#endif  // BUILDFLAG(IS_APPLE)
+#endif  // BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX)
     socket_factory_.Connect(connection_settings_->receiver_endpoint, policy,
                             &router_);
   });
@@ -81,6 +83,33 @@ void LoopingFileCastAgent::OnConnected(SenderSocketFactory* factory,
   message_port_.SetSocket(socket->GetWeakPtr());
   router_.TakeSocket(this, std::move(socket));
 
+  // If the session was pre-configured by an external host, directly
+  // establish a messaging session to the provided transportId.
+  const bool is_preconfigured =
+      connection_settings_ &&
+      connection_settings_->preconfigured_session_info.has_value();
+
+  if (is_preconfigured) {
+    const auto& preconfig =
+        connection_settings_->preconfigured_session_info.value();
+    app_session_id_ = preconfig.app_session_id;
+    has_launched_ = true;
+
+    remote_connection_.emplace(VirtualConnection{
+        MakeUniqueSessionId("streaming_sender"), preconfig.remote_transport_id,
+        message_port_.GetSocketId()});
+    OSP_LOG_INFO
+        << "Session was pre-configured by an external host. Bypassing "
+           "receiver LAUNCH and directly establishing messaging session to "
+           "transportId: "
+        << preconfig.remote_transport_id << " (sessionId=" << app_session_id_
+        << ")...";
+    connection_handler_.OpenRemoteConnection(
+        *remote_connection_,
+        [this](bool success) { OnRemoteMessagingOpened(success); });
+    return;
+  }
+
   OSP_LOG_INFO << "Launching Mirroring App on the Cast Receiver...";
   // First, CONNECT to the platform receiver.
   platform_remote_connection_.emplace(VirtualConnection{
@@ -94,17 +123,17 @@ void LoopingFileCastAgent::OnError(SenderSocketFactory* factory,
                                    const IPEndpoint& endpoint,
                                    const Error& error) {
   OSP_LOG_ERROR << "Cast agent received socket factory error: " << error;
-  Shutdown();
+  Shutdown();  // Never connected; nothing to notify.
 }
 
 void LoopingFileCastAgent::OnClose(CastSocket* cast_socket) {
   OSP_VLOG << "Cast agent socket closed.";
-  Shutdown();
+  Shutdown();  // The socket is already gone; nothing to notify.
 }
 
 void LoopingFileCastAgent::OnError(CastSocket* socket, const Error& error) {
   OSP_LOG_ERROR << "Cast agent received socket error: " << error;
-  Shutdown();
+  Shutdown();  // The connection is broken; nothing to notify.
 }
 
 bool LoopingFileCastAgent::IsConnectionAllowed(
@@ -137,6 +166,12 @@ void LoopingFileCastAgent::OnMessage(VirtualConnectionRouter* router,
     const ErrorOr<Json::Value> payload = json::Parse(GetPayload(message));
     if (payload.is_error()) {
       OSP_LOG_ERROR << "Failed to parse message: " << payload.error();
+      return;
+    }
+
+    if (!payload.value().isObject()) {
+      OSP_LOG_ERROR << "Parsed message is not a JSON object";
+      return;
     }
 
     if (HasType(payload.value(), CastMessageType::kReceiverStatus)) {
@@ -149,7 +184,7 @@ void LoopingFileCastAgent::OnMessage(VirtualConnectionRouter* router,
       OSP_LOG_ERROR
           << "Failed to launch the Cast Mirroring App on the Receiver! Reason: "
           << reason;
-      Shutdown();
+      Shutdown();  // Never launched; nothing to notify.
     } else if (HasType(payload.value(), CastMessageType::kInvalidRequest)) {
       std::string reason;
       if (!json::TryParseString(payload.value()[kMessageKeyReason], &reason)) {
@@ -179,8 +214,10 @@ void LoopingFileCastAgent::HandleReceiverStatus(const Json::Value& status) {
       running_app_id != GetStreamingAppId()) {
     if (has_launched_) {
       // The mirroring app is not running and should have already been launched.
-      // If it was just stopped, Shutdown() will tear everything down. If it has
-      // been stopped already, Shutdown() is a no-op.
+      // The receiver has already told us it's gone (whether because we asked it
+      // to stop, or for some other reason), so there is nothing left to request
+      // -- just tear down locally. If it has been stopped already, Shutdown()
+      // is a no-op.
       Shutdown();
     }
     return;
@@ -196,7 +233,7 @@ void LoopingFileCastAgent::HandleReceiverStatus(const Json::Value& status) {
     OSP_LOG_ERROR
         << "Cannot continue: Cast Receiver did not provide a session ID for "
            "the Mirroring App running on it.";
-    Shutdown();
+    RequestStop();
     return;
   }
   if (app_session_id_ != session_id) {
@@ -205,7 +242,7 @@ void LoopingFileCastAgent::HandleReceiverStatus(const Json::Value& status) {
     } else {
       OSP_LOG_ERROR << "Cannot continue: Different Mirroring App session is "
                        "now running on the Cast Receiver.";
-      Shutdown();
+      RequestStop();
       return;
     }
   }
@@ -225,7 +262,7 @@ void LoopingFileCastAgent::HandleReceiverStatus(const Json::Value& status) {
     OSP_LOG_ERROR
         << "Cannot continue: Cast Receiver did not provide a transport ID for "
            "routing messages to the Mirroring App running on it.";
-    Shutdown();
+    RequestStop();
     return;
   }
 
@@ -251,7 +288,9 @@ void LoopingFileCastAgent::OnRemoteMessagingOpened(bool success) {
   } else {
     OSP_LOG_INFO << "Failed to establish messaging to the Cast Receiver's "
                     "Mirroring App. Perhaps another Cast Sender is using it?";
-    Shutdown();
+    // The app is (or was) launched under a session we know about; ask the
+    // receiver to stop it rather than just abandoning it running.
+    RequestStop();
   }
 }
 
@@ -261,18 +300,18 @@ void LoopingFileCastAgent::OnReceiverMessagingOpened(bool success) {
   OSP_CHECK(!remote_connection_);
   if (!success) {
     OSP_LOG_INFO << "Failed to establish messaging to the Cast Receiver.";
-    Shutdown();
+    Shutdown();  // Never launched; nothing to notify.
     return;
   }
 
   static constexpr char kLaunchMessageTemplate[] =
-      R"({"type":"LAUNCH", "requestId":%d, "appId":"%s", "language": "en-US",
-       "supportedAppTypes":["WEB"]})";
+      R"({{"type":"LAUNCH", "requestId":{}, "appId":"{}", "language": "en-US",
+       "supportedAppTypes":["WEB"]}})";
   router_.Send(*platform_remote_connection_,
                MakeSimpleUTF8Message(
                    kReceiverNamespace,
-                   StringPrintf(kLaunchMessageTemplate, next_request_id_++,
-                                GetStreamingAppId())));
+                   std::format(kLaunchMessageTemplate, next_request_id_++,
+                               GetStreamingAppId())));
 }
 
 void LoopingFileCastAgent::CreateAndStartSession() {
@@ -289,9 +328,14 @@ void LoopingFileCastAgent::CreateAndStartSession() {
       &message_port_,
       remote_connection_->local_id,
       remote_connection_->peer_id,
-      connection_settings_->use_android_rtp_hack};
+      connection_settings_->use_android_rtp_hack,
+      connection_settings_->enable_dscp};
   current_session_ = std::make_unique<SenderSession>(std::move(config));
   current_session_->SetStatsClient(this);
+  if (connection_settings_->enable_input_events) {
+    current_session_->SetInputCallback(
+        [this](InputMessage message) { OnInputMessage(std::move(message)); });
+  }
   OSP_CHECK(!message_port_.source_id().empty());
 
   AudioCaptureConfig audio_config;
@@ -301,7 +345,9 @@ void LoopingFileCastAgent::CreateAndStartSession() {
       .codec = connection_settings_->codec,
       // The video config is allowed to use whatever is left over after audio.
       .max_bit_rate =
-          connection_settings_->max_bitrate - audio_config.bit_rate};
+          connection_settings_->max_bitrate -
+          (connection_settings_->should_include_audio ? audio_config.bit_rate
+                                                      : 0)};
   // Use default display resolution of 1080P.
   video_config.resolutions.emplace_back(Resolution{1920, 1080});
 
@@ -317,8 +363,12 @@ void LoopingFileCastAgent::CreateAndStartSession() {
         current_session_->NegotiateRemoting(audio_config, video_config);
   } else {
     cast_mode_ = CastMode::kMirroring;
-    negotiation_error =
-        current_session_->Negotiate({audio_config}, {video_config});
+    if (connection_settings_->should_include_audio) {
+      negotiation_error =
+          current_session_->Negotiate({audio_config}, {video_config});
+    } else {
+      negotiation_error = current_session_->Negotiate({}, {video_config});
+    }
   }
   if (!negotiation_error.ok()) {
     OSP_LOG_ERROR << "Failed to negotiate a session: " << negotiation_error;
@@ -329,8 +379,10 @@ void LoopingFileCastAgent::OnNegotiated(
     const SenderSession* session,
     SenderSession::ConfiguredSenders senders,
     capture_recommendations::Recommendations capture_recommendations) {
-  if (senders.audio_sender == nullptr || senders.video_sender == nullptr) {
-    OSP_LOG_ERROR << "Missing both audio and video, so exiting...";
+  if (senders.video_sender == nullptr ||
+      (connection_settings_->should_include_audio &&
+       senders.audio_sender == nullptr)) {
+    OSP_LOG_ERROR << "Missing required senders, so exiting...";
     return;
   }
 
@@ -344,7 +396,41 @@ void LoopingFileCastAgent::OnNegotiated(
 void LoopingFileCastAgent::OnError(const SenderSession* session,
                                    const Error& error) {
   OSP_LOG_ERROR << "SenderSession fatal error: " << error;
-  Shutdown();
+  RequestStop();
+}
+
+void LoopingFileCastAgent::OnInputMessage(InputMessage message) {
+  if (file_sender_) {
+    file_sender_->OnInputMessage(message);
+  }
+  for (const auto& event : message.events()) {
+    std::string type_name;
+    switch (event.type()) {
+      case InputMessage::INPUT_TYPE_MOUSE_DOWN:
+        type_name = "MOUSE_DOWN";
+        break;
+      case InputMessage::INPUT_TYPE_MOUSE_UP:
+        type_name = "MOUSE_UP";
+        break;
+      case InputMessage::INPUT_TYPE_MOUSE_MOVE:
+        type_name = "MOUSE_MOVE";
+        break;
+      default:
+        type_name = "OTHER";
+        break;
+    }
+
+    if (event.has_mouse_event()) {
+      const auto& mouse = event.mouse_event();
+      OSP_LOG_INFO << "[Input] Received " << type_name << " at ("
+                   << mouse.location().x() << ", " << mouse.location().y()
+                   << ") buttons=" << mouse.buttons_size()
+                   << " viewport_size=" << message.viewport_width() << "x"
+                   << message.viewport_height();
+    } else {
+      OSP_LOG_INFO << "[Input] Received event type=" << type_name;
+    }
+  }
 }
 
 void LoopingFileCastAgent::OnStatisticsUpdated(
@@ -352,7 +438,7 @@ void LoopingFileCastAgent::OnStatisticsUpdated(
   // Only log every 10 times, or roughly every 5 seconds.
   constexpr int kLoggingInterval = 10;
   if ((num_times_on_statistics_updated_called_++ % kLoggingInterval) == 0) {
-    OSP_VLOG << __func__ << ": updated_stats=" << updated_stats.ToString();
+    OSP_VLOG << __func__ << ": updated_stats=" << updated_stats;
   }
   last_reported_statistics_ = std::make_optional<SenderStats>(updated_stats);
 }
@@ -371,7 +457,7 @@ void LoopingFileCastAgent::OnPlaybackRateChange(double rate) {
 
 void LoopingFileCastAgent::StartFileSender() {
   OSP_CHECK(current_negotiation_);
-  file_sender_ = std::make_unique<LoopingFileSender>(
+  file_sender_ = FileSender::Create(
       *environment_, connection_settings_.value(), current_session_.get(),
       std::move(*current_negotiation_), [this]() { shutdown_callback_(); });
   current_negotiation_.reset();
@@ -380,6 +466,18 @@ void LoopingFileCastAgent::StartFileSender() {
 
 void LoopingFileCastAgent::Shutdown() {
   TRACE_DEFAULT_SCOPED(TraceCategory::kStandaloneSender);
+  // No-op if nothing is scheduled (e.g. this wasn't reached via
+  // RequestStop(), or the receiver's confirmation beat the timeout).
+  stop_ack_timeout_.Cancel();
+
+  // Cleared here, rather than in RequestStop() as soon as STOP is sent, so
+  // that `app_session_id_` stays accurate for the whole time a STOP may still
+  // be outstanding. In particular, HandleReceiverStatus() uses an empty
+  // `app_session_id_` to mean "no session -- adopt whatever the receiver
+  // reports next"; clearing it early would make a stale/duplicate
+  // RECEIVER_STATUS that still echoes the old (soon-to-be-stopped) session
+  // during RequestStop()'s wait window look like a brand new one to adopt.
+  app_session_id_.clear();
 
   file_sender_.reset();
   if (current_session_) {
@@ -387,8 +485,7 @@ void LoopingFileCastAgent::Shutdown() {
     current_session_.reset();
 
     if (last_reported_statistics_) {
-      OSP_LOG_INFO << "Last reported statistics="
-                   << last_reported_statistics_->ToString();
+      OSP_LOG_INFO << "Last reported statistics=" << *last_reported_statistics_;
     }
   }
   OSP_CHECK(message_port_.source_id().empty());
@@ -410,19 +507,6 @@ void LoopingFileCastAgent::Shutdown() {
     connection_handler_.CloseRemoteConnection(connection);
   }
 
-  if (!app_session_id_.empty()) {
-    OSP_LOG_INFO << "Stopping the Cast Receiver's Mirroring App...";
-    static constexpr char kStopMessageTemplate[] =
-        R"({"type":"STOP", "requestId":%d, "sessionId":"%s"})";
-    std::string stop_json = StringPrintf(
-        kStopMessageTemplate, next_request_id_++, app_session_id_.c_str());
-    router_.Send(
-        VirtualConnection{kPlatformSenderId, kPlatformReceiverId,
-                          message_port_.GetSocketId()},
-        MakeSimpleUTF8Message(kReceiverNamespace, std::move(stop_json)));
-    app_session_id_.clear();
-  }
-
   if (message_port_.GetSocketId() != ToCastSocketId(nullptr)) {
     router_.CloseSocket(message_port_.GetSocketId());
     message_port_.SetSocket({});
@@ -434,6 +518,51 @@ void LoopingFileCastAgent::Shutdown() {
     const ShutdownCallback callback = std::move(shutdown_callback_);
     callback();
   }
+}
+
+void LoopingFileCastAgent::RequestStop() {
+  if (stop_requested_) {
+    // A previous, independent call already sent STOP (or determined there
+    // was nothing to stop) and is either waiting for confirmation or has
+    // already finished. Don't act again -- in particular, don't fall through
+    // to Shutdown() below, which would tear down the connection before that
+    // first call's STOP message has had a chance to actually reach the wire.
+    return;
+  }
+  stop_requested_ = true;
+
+  if (!app_session_id_.empty()) {
+    if (connection_settings_ &&
+        connection_settings_->preconfigured_session_info.has_value()) {
+      // The session was preconfigured/prelaunched by an external caller (such
+      // as a Python test host). The external caller is strictly responsible for
+      // terminating the session on the receiver upon completion or shutdown.
+    } else {
+      OSP_LOG_INFO << "Stopping the Cast Receiver's Mirroring App...";
+      static constexpr char kStopMessageTemplate[] =
+          R"({{"type":"STOP", "requestId":{}, "sessionId":"{}"}})";
+      std::string stop_json = std::format(
+          kStopMessageTemplate, next_request_id_++, app_session_id_.c_str());
+      router_.Send(
+          *platform_remote_connection_,
+          MakeSimpleUTF8Message(kReceiverNamespace, std::move(stop_json)));
+
+      // Give the Cast Receiver a bounded opportunity to confirm the STOP (a
+      // subsequent RECEIVER_STATUS showing the app has stopped calls
+      // Shutdown() directly from HandleReceiverStatus(), which cancels this
+      // timeout) before forcibly tearing down the connection via Shutdown().
+      // Without this, closing the socket immediately after queuing the STOP
+      // message races with the underlying async write path and can drop the
+      // message before it ever reaches the receiver.
+      static constexpr Clock::duration kStopAckTimeout =
+          std::chrono::milliseconds(500);
+      stop_ack_timeout_.ScheduleFromNow([this] { Shutdown(); },
+                                        kStopAckTimeout);
+      return;
+    }
+  }
+
+  Shutdown();
 }
 
 }  // namespace openscreen::cast

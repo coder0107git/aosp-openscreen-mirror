@@ -107,11 +107,10 @@ void ExpectFailureOnParse(std::string_view body,
   ErrorOr<Json::Value> root = json::Parse(body);
   ASSERT_TRUE(root.is_value()) << root.error();
 
-  Offer offer;
-  Error error = Offer::TryParse(std::move(root.value()), &offer);
-  EXPECT_FALSE(error.ok());
+  const auto offer_or_error = Offer::TryParse(std::move(root.value()));
+  EXPECT_TRUE(offer_or_error.is_error());
   if (expected) {
-    EXPECT_EQ(expected, error.code());
+    EXPECT_EQ(expected, offer_or_error.error().code());
   }
 }
 
@@ -226,6 +225,17 @@ TEST(OfferTest, ErrorOnEmptyOffer) {
   ExpectFailureOnParse("{}");
 }
 
+TEST(OfferTest, ErrorOnNonObjectOffer) {
+  Json::Value array_val(Json::arrayValue);
+  EXPECT_TRUE(Offer::TryParse(array_val).is_error());
+
+  Json::Value string_val("string");
+  EXPECT_TRUE(Offer::TryParse(string_val).is_error());
+
+  Json::Value int_val(42);
+  EXPECT_TRUE(Offer::TryParse(int_val).is_error());
+}
+
 TEST(OfferTest, ErrorOnMissingMandatoryFields) {
   // It's okay if castMode is omitted, but if supportedStreams is omitted we
   // should fail here.
@@ -241,8 +251,8 @@ TEST(OfferTest, CanParseValidButStreamlessOffer) {
   })");
   ASSERT_TRUE(root.is_value()) << root.error();
 
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
+  const auto offer_or_error = Offer::TryParse(std::move(root.value()));
+  EXPECT_TRUE(offer_or_error.is_value());
 }
 
 TEST(OfferTest, ErrorOnMissingAudioStreamMandatoryField) {
@@ -291,8 +301,8 @@ TEST(OfferTest, CanParseValidButMinimalAudioOffer) {
     }]
   })");
   ASSERT_TRUE(root.is_value());
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
+  const auto offer_or_error = Offer::TryParse(root.value());
+  EXPECT_TRUE(offer_or_error.is_value());
 }
 
 TEST(OfferTest, CanParseValidZeroBitRateAudioOffer) {
@@ -313,8 +323,8 @@ TEST(OfferTest, CanParseValidZeroBitRateAudioOffer) {
     }]
   })");
   ASSERT_TRUE(root.is_value()) << root.error();
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
+  const auto offer_or_error = Offer::TryParse(root.value());
+  EXPECT_TRUE(offer_or_error.is_value());
 }
 
 TEST(OfferTest, ErrorOnInvalidRtpTimebase) {
@@ -556,29 +566,29 @@ TEST(OfferTest, CanParseValidButMinimalVideoOffer) {
   })");
 
   ASSERT_TRUE(root.is_value());
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
+  const auto offer_or_error = Offer::TryParse(root.value());
+  EXPECT_TRUE(offer_or_error.is_value());
 }
 
 TEST(OfferTest, CanParseValidOffer) {
   ErrorOr<Json::Value> root = json::Parse(kValidOffer);
   ASSERT_TRUE(root.is_value());
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
+  const auto offer_or_error = Offer::TryParse(root.value());
+  ASSERT_TRUE(offer_or_error.is_value());
 
-  ExpectEqualsValidOffer(offer);
+  ExpectEqualsValidOffer(offer_or_error.value());
 }
 
 TEST(OfferTest, ParseAndToJsonResultsInSameOffer) {
   ErrorOr<Json::Value> root = json::Parse(kValidOffer);
   ASSERT_TRUE(root.is_value());
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
-  ExpectEqualsValidOffer(offer);
+  const auto offer_or_error = Offer::TryParse(root.value());
+  ASSERT_TRUE(offer_or_error.is_value());
+  ExpectEqualsValidOffer(offer_or_error.value());
 
-  Offer reparsed_offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &reparsed_offer).ok());
-  ExpectEqualsValidOffer(reparsed_offer);
+  const auto reparsed_offer_or_error = Offer::TryParse(root.value());
+  ASSERT_TRUE(reparsed_offer_or_error.is_value());
+  ExpectEqualsValidOffer(reparsed_offer_or_error.value());
 }
 
 // We don't want to enforce that a given offer must have both audio and
@@ -586,10 +596,10 @@ TEST(OfferTest, ParseAndToJsonResultsInSameOffer) {
 TEST(OfferTest, IsValidWithMissingStreams) {
   ErrorOr<Json::Value> root = json::Parse(kValidOffer);
   ASSERT_TRUE(root.is_value());
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
-  ExpectEqualsValidOffer(offer);
-  const Offer valid_offer = std::move(offer);
+  const auto offer_or_error = Offer::TryParse(root.value());
+  ASSERT_TRUE(offer_or_error.is_value());
+  ExpectEqualsValidOffer(offer_or_error.value());
+  const Offer valid_offer = std::move(offer_or_error.value());
 
   Offer missing_audio_streams = valid_offer;
   missing_audio_streams.audio_streams.clear();
@@ -603,17 +613,17 @@ TEST(OfferTest, IsValidWithMissingStreams) {
 TEST(OfferTest, InvalidIfInvalidStreams) {
   ErrorOr<Json::Value> root = json::Parse(kValidOffer);
   ASSERT_TRUE(root.is_value());
-  Offer offer;
-  EXPECT_TRUE(Offer::TryParse(std::move(root.value()), &offer).ok());
-  ExpectEqualsValidOffer(offer);
+  const auto offer_or_error = Offer::TryParse(root.value());
+  ASSERT_TRUE(offer_or_error.is_value());
+  ExpectEqualsValidOffer(offer_or_error.value());
 
-  Offer video_stream_invalid = offer;
+  Offer video_stream_invalid = offer_or_error.value();
   video_stream_invalid.video_streams[0].max_frame_rate = SimpleFraction{1, 0};
   EXPECT_FALSE(video_stream_invalid.IsValid());
 
-  Offer audio_stream_invalid = offer;
-  video_stream_invalid.audio_streams[0].bit_rate = 0;
-  EXPECT_FALSE(video_stream_invalid.IsValid());
+  Offer audio_stream_invalid = offer_or_error.value();
+  audio_stream_invalid.audio_streams[0].bit_rate = -1;
+  EXPECT_FALSE(audio_stream_invalid.IsValid());
 }
 
 TEST(OfferTest, FailsIfUnencrypted) {
@@ -705,6 +715,92 @@ TEST(OfferTest, FailsIfUnencrypted) {
     }]
   })",
                        Error::Code::kUnencryptedOffer);
+}
+
+TEST(OfferTest, ErrorOnMixedDscpValues) {
+  ExpectFailureOnParse(R"({
+    "castMode": "mirroring",
+    "supportedStreams": [
+      {
+        "index": 0,
+        "type": "video_source",
+        "codecName": "h264",
+        "rtpProfile": "cast",
+        "rtpPayloadType": 101,
+        "ssrc": 19088743,
+        "maxFrameRate": "60000/1000",
+        "timeBase": "1/90000",
+        "maxBitRate": 5000000,
+        "aesKey": "040d756791711fd3adb939066e6d8690",
+        "aesIvMask": "9ff0f022a959150e70a2d05a6c184aed",
+        "receiverRtcpDscp": 10
+      },
+      {
+        "index": 2,
+        "type": "audio_source",
+        "codecName": "opus",
+        "rtpProfile": "cast",
+        "rtpPayloadType": 96,
+        "ssrc": 4294967295,
+        "bitRate": 124000,
+        "timeBase": "1/48000",
+        "channels": 2,
+        "aesKey": "51027e4e2347cbcb49d57ef10177aebc",
+        "aesIvMask": "7f12a19be62a36c04ae4116caaeff6d1",
+        "receiverRtcpDscp": 20
+      }
+    ]
+  })",
+                       Error::Code::kJsonParseError);
+}
+
+TEST(OfferTest, CanParseValidOfferWithDataTransport) {
+  ErrorOr<Json::Value> root = json::Parse(R"({
+    "castMode": "mirroring",
+    "supportedStreams": [],
+    "dataTransport": {
+      "protocol": "webtransport"
+    }
+  })");
+  ASSERT_TRUE(root.is_value()) << root.error();
+
+  const auto offer_or_error = Offer::TryParse(std::move(root.value()));
+  ASSERT_TRUE(offer_or_error.is_value());
+  EXPECT_TRUE(offer_or_error.value().data_transport.has_value());
+  EXPECT_EQ(offer_or_error.value().data_transport->protocol,
+            DataTransportProtocol::kWebTransport);
+
+  // Serialization check.
+  Json::Value serialized = offer_or_error.value().ToJson();
+  EXPECT_TRUE(serialized.isMember("dataTransport"));
+  EXPECT_EQ(serialized["dataTransport"]["protocol"].asString(), "webtransport");
+}
+
+TEST(OfferTest, ErrorOnInvalidDataTransport) {
+  ExpectFailureOnParse(R"({
+    "castMode": "mirroring",
+    "supportedStreams": [],
+    "dataTransport": {
+      "protocol": ""
+    }
+  })",
+                       Error::Code::kJsonParseError);
+
+  ExpectFailureOnParse(R"({
+    "castMode": "mirroring",
+    "supportedStreams": [],
+    "dataTransport": {
+      "protocol": "QUIC"
+    }
+  })",
+                       Error::Code::kJsonParseError);
+
+  ExpectFailureOnParse(R"({
+    "castMode": "mirroring",
+    "supportedStreams": [],
+    "dataTransport": null
+  })",
+                       Error::Code::kJsonParseError);
 }
 
 }  // namespace openscreen::cast

@@ -5,6 +5,7 @@
 #ifndef CAST_STREAMING_PUBLIC_RECEIVER_SESSION_H_
 #define CAST_STREAMING_PUBLIC_RECEIVER_SESSION_H_
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -13,18 +14,23 @@
 #include "cast/common/public/message_port.h"
 #include "cast/streaming/capture_configs.h"
 #include "cast/streaming/impl/receiver_packet_router.h"
-#include "cast/streaming/impl/session_config.h"
+#include "cast/streaming/input.pb.h"
 #include "cast/streaming/public/constants.h"
+#include "cast/streaming/public/environment.h"
 #include "cast/streaming/public/offer_messages.h"
+#include "cast/streaming/public/protobuf_messenger.h"
 #include "cast/streaming/public/receiver_constraints.h"
 #include "cast/streaming/public/rpc_messenger.h"
+#include "cast/streaming/public/session_config.h"
 #include "cast/streaming/public/session_messenger.h"
 #include "cast/streaming/resolution.h"
 #include "cast/streaming/sender_message.h"
+#include "platform/base/ip_address.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::cast {
 
-class Environment;
 class Receiver;
 
 // This class is responsible for listening for streaming requests from Cast
@@ -56,11 +62,15 @@ class ReceiverSession final : public Environment::SocketSubscriber {
     // an acceptable session configuration with the sender, then either of the
     // receivers may be nullptr. In this case, the associated config is default
     // initialized and should be ignored.
-    Receiver* audio_receiver;
+    raw_ptr<Receiver> audio_receiver;
     AudioCaptureConfig audio_config;
 
-    Receiver* video_receiver;
+    raw_ptr<Receiver> video_receiver;
     VideoCaptureConfig video_config;
+
+    // Set to true if input events were successfully negotiated for this
+    // session.
+    bool input_enabled;
 
     // The ID of the sender that this set of receivers was configured to
     // communicate with.
@@ -81,7 +91,7 @@ class ReceiverSession final : public Environment::SocketSubscriber {
     // Unlike the SenderSession API, the RPC messenger is negotiation specific.
     // The messenger is torn down when `OnReceiversDestroying` is called, and
     // is owned by the ReceiverSession.
-    RpcMessenger* messenger;
+    raw_ptr<RpcMessenger> messenger;
   };
 
   // The embedder should provide a client for handling connections.
@@ -148,7 +158,27 @@ class ReceiverSession final : public Environment::SocketSubscriber {
   ReceiverSession& operator=(ReceiverSession&&) = delete;
   ~ReceiverSession() override;
 
+  // The RPC messenger for this session. NOTE: RPC messages may come at
+  // any time from the receiver, so subscriptions to RPC remoting messages
+  // should be done before calling `NegotiateRemoting`.
+  RpcMessenger* rpc_messenger() { return rpc_messenger_.get(); }
+
   const std::string& session_id() const { return session_id_; }
+
+  // Set the callback for handling input events. If set, future negotiations
+  // will include support for input events. If not set, negotiations will not
+  // include input event support and further input event messages will be
+  // ignored.
+  void SetInputCallback(std::function<void(InputMessage)> callback);
+
+  // Sends an input message to the currently negotiated sender.
+  void SendInputMessage(const InputMessage& message);
+
+  void SetCustomMessageHandler(
+      std::string_view message_namespace,
+      ReceiverSessionMessenger::CustomMessageCallback cb);
+
+  ReceiverSessionMessenger* messenger() { return messenger_.get(); }
 
   // Environment::SocketSubscriber event callbacks.
   void OnSocketReady() override;
@@ -182,6 +212,7 @@ class ReceiverSession final : public Environment::SocketSubscriber {
   void OnCapabilitiesRequest(const std::string& sender_id,
                              SenderMessage message);
   void OnRpcMessage(const std::string& sender_id, SenderMessage message);
+  void OnInputMessage(const std::string& sender_id, SenderMessage message);
 
   // Sends an RPC message to the currently negotiated sender.
   void SendRpcMessage(std::vector<uint8_t> message);
@@ -216,8 +247,8 @@ class ReceiverSession final : public Environment::SocketSubscriber {
                             int sequence_number,
                             const Error& error);
 
-  Client& client_;
-  Environment& environment_;
+  const raw_ref<Client> client_;
+  const raw_ref<Environment> environment_;
   const ReceiverConstraints constraints_;
 
   // The sender_id of this session.
@@ -228,7 +259,7 @@ class ReceiverSession final : public Environment::SocketSubscriber {
   std::string negotiated_sender_id_;
 
   // The session messenger used for the lifetime of this session.
-  ReceiverSessionMessenger messenger_;
+  std::unique_ptr<ReceiverSessionMessenger> messenger_;
 
   // The packet router to be used for all Receivers spawned by this session.
   ReceiverPacketRouter packet_router_;
@@ -244,6 +275,10 @@ class ReceiverSession final : public Environment::SocketSubscriber {
   // If remoting, we store the RpcMessenger used by the embedder to send RPC
   // messages from the remoting protobuf specification.
   std::unique_ptr<RpcMessenger> rpc_messenger_;
+
+  // The INPUT messenger, which uses the session messenger for sending INPUT
+  // messages.
+  ProtobufMessenger<InputMessage> input_messenger_;
 };
 
 }  // namespace openscreen::cast

@@ -20,31 +20,38 @@
 #include "platform/base/span.h"
 #include "platform/test/fake_clock.h"
 #include "platform/test/fake_task_runner.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::osp {
 namespace {
 
 using ::testing::_;
-using ::testing::Invoke;
 using ::testing::Test;
 
 class MockConnectRequestCallback final : public ConnectRequestCallback {
  public:
   ~MockConnectRequestCallback() override = default;
 
-  MOCK_METHOD3(OnConnectSucceed,
-               void(uint64_t request_id,
-                    std::string_view instance_name,
-                    uint64_t instance_id));
-  MOCK_METHOD2(OnConnectFailed,
-               void(uint64_t request_id, std::string_view instance_name));
+  MOCK_METHOD(void,
+              OnConnectSucceed,
+              (uint64_t request_id,
+               std::string_view instance_name,
+               uint64_t instance_id),
+              (override));
+  MOCK_METHOD(void,
+              OnConnectFailed,
+              (uint64_t request_id, std::string_view instance_name),
+              (override));
 };
 
 class MockConnectionObserver final : public ProtocolConnection::Observer {
  public:
   ~MockConnectionObserver() override = default;
 
-  MOCK_METHOD1(OnConnectionClosed, void(const ProtocolConnection& connection));
+  MOCK_METHOD(void,
+              OnConnectionClosed,
+              (const ProtocolConnection& connection),
+              (override));
 };
 
 class QuicServerTest : public Test {
@@ -63,18 +70,17 @@ class QuicServerTest : public Test {
     std::unique_ptr<ProtocolConnection> stream;
     EXPECT_CALL(mock_connect_request_callback, OnConnectSucceed(_, _, _))
         .WillOnce(
-            Invoke([this](uint64_t request_id, std::string_view instance_name,
-                          uint64_t instance_id) {
+            [this](uint64_t request_id, std::string_view instance_name,
+                   uint64_t instance_id) {
               client_connection_ =
                   quic_bridge_.GetQuicClient()->CreateProtocolConnection(
                       instance_id);
-            }));
+            });
     EXPECT_CALL(quic_bridge_.mock_server_observer(),
                 OnIncomingConnectionMock(_))
-        .WillOnce(
-            Invoke([&stream](std::unique_ptr<ProtocolConnection>& connection) {
-              stream = std::move(connection);
-            }));
+        .WillOnce([&stream](std::unique_ptr<ProtocolConnection>& connection) {
+          stream = std::move(connection);
+        });
     quic_bridge_.RunTasksUntilIdle();
     return stream;
   }
@@ -106,16 +112,16 @@ class QuicServerTest : public Test {
     EXPECT_CALL(mock_message_callback,
                 OnStreamMessage(
                     1, _, msgs::Type::kPresentationConnectionMessage, _, _, _))
-        .WillOnce(Invoke([&decode_result, &received_message](
-                             uint64_t instance_id, uint64_t connection_id,
-                             msgs::Type message_type, const uint8_t* buf,
-                             size_t buffer_size, Clock::time_point now) {
+        .WillOnce([&decode_result, &received_message](
+                      uint64_t instance_id, uint64_t connection_id,
+                      msgs::Type message_type, const uint8_t* buf,
+                      size_t buffer_size, Clock::time_point now) {
           decode_result = msgs::DecodePresentationConnectionMessage(
               buf, buffer_size, received_message);
           if (decode_result < 0)
             return ErrorOr<size_t>(Error::Code::kCborParsing);
           return ErrorOr<size_t>(decode_result);
-        }));
+        });
     quic_bridge_.RunTasksUntilIdle();
 
     ASSERT_GT(decode_result, 0);
@@ -130,7 +136,7 @@ class QuicServerTest : public Test {
   FakeClock fake_clock_;
   FakeTaskRunner task_runner_;
   FakeQuicBridge quic_bridge_;
-  QuicServer* server_;
+  raw_ptr<QuicServer> server_;
   std::unique_ptr<ProtocolConnection> client_connection_;
 };
 
@@ -153,10 +159,10 @@ TEST_F(QuicServerTest, OpenImmediate) {
 
   std::unique_ptr<ProtocolConnection> connection2;
   EXPECT_CALL(quic_bridge_.mock_client_observer(), OnIncomingConnectionMock(_))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&connection2](std::unique_ptr<ProtocolConnection>& connection) {
             connection2 = std::move(connection);
-          }));
+          });
   std::unique_ptr<ProtocolConnection> connection3 =
       server_->CreateProtocolConnection(connection1->GetInstanceID());
 

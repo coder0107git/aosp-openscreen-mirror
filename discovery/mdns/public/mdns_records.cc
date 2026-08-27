@@ -5,10 +5,10 @@
 #include "discovery/mdns/public/mdns_records.h"
 
 #include <algorithm>
-#include <cctype>
 #include <limits>
 #include <ostream>
 #include <sstream>
+#include <variant>
 #include <vector>
 
 #include "discovery/mdns/public/mdns_writer.h"
@@ -29,8 +29,8 @@ inline int CompareIgnoreCase(const std::string& x, const std::string& y) {
     if (i == y.size()) {
       return 1;
     }
-    const char& x_char = std::tolower(x[i]);
-    const char& y_char = std::tolower(y[i]);
+    const char x_char = ascii_tolower(x[i]);
+    const char y_char = ascii_tolower(y[i]);
     if (x_char < y_char) {
       return -1;
     } else if (y_char < x_char) {
@@ -42,8 +42,8 @@ inline int CompareIgnoreCase(const std::string& x, const std::string& y) {
 
 template <typename RDataType>
 bool IsGreaterThan(const Rdata& lhs, const Rdata& rhs) {
-  const RDataType& lhs_cast = absl::get<RDataType>(lhs);
-  const RDataType& rhs_cast = absl::get<RDataType>(rhs);
+  const RDataType& lhs_cast = std::get<RDataType>(lhs);
+  const RDataType& rhs_cast = std::get<RDataType>(rhs);
 
   // The Extra 2 in length is from the record size that Write() prepends to the
   // result.
@@ -169,8 +169,8 @@ size_t DomainName::MaxWireSize() const {
 }
 
 std::ostream& operator<<(std::ostream& os, const DomainName& domain_name) {
-  return os << string_util::Join(domain_name.labels_.cbegin(),
-                                 domain_name.labels_.cend(), ".");
+  return os << Join(domain_name.labels_.cbegin(), domain_name.labels_.cend(),
+                    ".");
 }
 
 // static
@@ -583,20 +583,20 @@ bool MdnsRecord::IsValidConfig(const DomainName& name,
   // has been removed.
   return ttl.count() <= std::numeric_limits<uint32_t>::max() &&
          ((dns_type == DnsType::kSRV &&
-           absl::holds_alternative<SrvRecordRdata>(rdata)) ||
+           std::holds_alternative<SrvRecordRdata>(rdata)) ||
           (dns_type == DnsType::kA &&
-           absl::holds_alternative<ARecordRdata>(rdata)) ||
+           std::holds_alternative<ARecordRdata>(rdata)) ||
           (dns_type == DnsType::kAAAA &&
-           absl::holds_alternative<AAAARecordRdata>(rdata)) ||
+           std::holds_alternative<AAAARecordRdata>(rdata)) ||
           (dns_type == DnsType::kPTR &&
-           absl::holds_alternative<PtrRecordRdata>(rdata)) ||
+           std::holds_alternative<PtrRecordRdata>(rdata)) ||
           (dns_type == DnsType::kTXT &&
-           absl::holds_alternative<TxtRecordRdata>(rdata)) ||
+           std::holds_alternative<TxtRecordRdata>(rdata)) ||
           (dns_type == DnsType::kNSEC &&
-           absl::holds_alternative<NsecRecordRdata>(rdata)) ||
+           std::holds_alternative<NsecRecordRdata>(rdata)) ||
           (dns_type == DnsType::kOPT &&
-           absl::holds_alternative<OptRecordRdata>(rdata)) ||
-          absl::holds_alternative<RawRecordRdata>(rdata));
+           std::holds_alternative<OptRecordRdata>(rdata)) ||
+          std::holds_alternative<RawRecordRdata>(rdata));
 }
 
 bool MdnsRecord::operator==(const MdnsRecord& rhs) const {
@@ -655,7 +655,7 @@ bool MdnsRecord::IsReannouncementOf(const MdnsRecord& rhs) const {
 size_t MdnsRecord::MaxWireSize() const {
   auto wire_size_visitor = [](auto&& arg) { return arg.MaxWireSize(); };
   // NAME size, 2-byte TYPE, 2-byte CLASS, 4-byte TTL, RDATA size
-  return name_.MaxWireSize() + absl::visit(wire_size_visitor, rdata_) + 8;
+  return name_.MaxWireSize() + std::visit(wire_size_visitor, rdata_) + 8;
 }
 
 #ifdef _DEBUG
@@ -665,14 +665,14 @@ std::ostream& operator<<(std::ostream& os, const MdnsRecord& mdns_record) {
 
   if (mdns_record.dns_type_ == DnsType::kPTR) {
     const DomainName& target =
-        absl::get<PtrRecordRdata>(mdns_record.rdata_).ptr_domain();
+        std::get<PtrRecordRdata>(mdns_record.rdata_).ptr_domain();
     os << ", target: '" << target << "'";
   } else if (mdns_record.dns_type_ == DnsType::kSRV) {
     const DomainName& target =
-        absl::get<SrvRecordRdata>(mdns_record.rdata_).target();
+        std::get<SrvRecordRdata>(mdns_record.rdata_).target();
     os << ", target: '" << target << "'";
   } else if (mdns_record.dns_type_ == DnsType::kNSEC) {
-    const auto& nsec_rdata = absl::get<NsecRecordRdata>(mdns_record.rdata_);
+    const auto& nsec_rdata = std::get<NsecRecordRdata>(mdns_record.rdata_);
     std::vector<DnsType> types = nsec_rdata.types();
     os << ", representing [";
     if (!types.empty()) {

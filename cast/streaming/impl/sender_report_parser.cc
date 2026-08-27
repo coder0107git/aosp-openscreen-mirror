@@ -29,12 +29,12 @@ std::optional<SenderReportParser::SenderReportWithId> SenderReportParser::Parse(
     if (!header) {
       return std::nullopt;
     }
-    buffer.remove_prefix(kRtcpCommonHeaderSize);
+    buffer = buffer.subspan(kRtcpCommonHeaderSize);
     if (static_cast<int>(buffer.size()) < header->payload_size) {
       return std::nullopt;
     }
     auto chunk = buffer.subspan(0, header->payload_size);
-    buffer.remove_prefix(header->payload_size);
+    buffer = buffer.subspan(header->payload_size);
 
     // Only process Sender Reports with a matching SSRC.
     if (header->packet_type != RtcpPacketType::kSenderReport) {
@@ -43,19 +43,20 @@ std::optional<SenderReportParser::SenderReportWithId> SenderReportParser::Parse(
     if (header->payload_size < kRtcpSenderReportSize) {
       return std::nullopt;
     }
-    if (ConsumeField<uint32_t>(chunk) != session_.sender_ssrc()) {
+    if (ConsumeField<uint32_t>(chunk) != session_->sender_ssrc()) {
       continue;
     }
     SenderReportWithId& report = sender_report.emplace();
     const NtpTimestamp ntp_timestamp = ConsumeField<uint64_t>(chunk);
     report.report_id = ToStatusReportId(ntp_timestamp);
-    report.reference_time = session_.ntp_converter().ToLocalTime(ntp_timestamp);
+    report.reference_time =
+        session_->ntp_converter().ToLocalTime(ntp_timestamp);
     report.rtp_timestamp =
         last_parsed_rtp_timestamp_.Expand(ConsumeField<uint32_t>(chunk));
     report.send_packet_count = ConsumeField<uint32_t>(chunk);
     report.send_octet_count = ConsumeField<uint32_t>(chunk);
     report.report_block = RtcpReportBlock::ParseOne(
-        chunk, header->with.report_count, session_.receiver_ssrc());
+        chunk, header->with.report_count, session_->receiver_ssrc());
   }
 
   // At this point, the packet is known to be well-formed. Cache the

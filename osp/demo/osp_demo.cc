@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -36,6 +37,9 @@
 #include "platform/impl/text_trace_logging_platform.h"
 #include "third_party/getopt/getopt.h"
 #include "third_party/tinycbor/src/src/cbor.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
+#include "util/string_util.h"
 #include "util/trace_logging.h"
 
 namespace {
@@ -44,7 +48,7 @@ constexpr char const* kReceiverLogFilename = "_recv_fifo";
 constexpr char const* kControllerLogFilename = "_cntl_fifo";
 
 bool g_done = false;
-bool g_dump_services = false;
+[[maybe_unused]] bool g_dump_services = false;
 
 void sigusr1_dump_services(int) {
   g_dump_services = true;
@@ -191,7 +195,7 @@ class DemoConnectionServiceObserver final
     ~ConnectionObserver() override = default;
 
     void OnConnectionClosed(const ProtocolConnection& connection) override {
-      auto& connections = parent_.connections_;
+      auto& connections = parent_->connections_;
       connections.erase(
           std::remove_if(
               connections.begin(), connections.end(),
@@ -203,7 +207,7 @@ class DemoConnectionServiceObserver final
     }
 
    private:
-    DemoConnectionServiceObserver& parent_;
+    const raw_ref<DemoConnectionServiceObserver> parent_;
   };
 
   DemoConnectionServiceObserver() = default;
@@ -294,7 +298,7 @@ class DemoConnectionDelegate final : public Connection::Delegate {
   void set_connection(Connection* connection) { connection_ = connection; }
 
  private:
-  Connection* connection_ = nullptr;
+  raw_ptr<Connection> connection_ = nullptr;
 };
 
 class DemoReceiverDelegate final : public ReceiverDelegate {
@@ -355,7 +359,7 @@ class DemoReceiverDelegate final : public ReceiverDelegate {
   const std::string& presentation_id() { return presentation_id_; }
 
  private:
-  Receiver* receiver_;
+  raw_ptr<Receiver> receiver_;
   std::string presentation_id_;
   std::unique_ptr<Connection> connection_;
   DemoConnectionDelegate connection_delegate_;
@@ -367,18 +371,32 @@ struct CommandLineSplit {
 };
 
 CommandLineSplit SeparateCommandFromArguments(const std::string& line) {
-  size_t split_index = line.find_first_of(' ');
-  // NOTE: `split_index` can be std::string::npos because not all commands
-  // accept arguments.
-  std::string command = line.substr(0, split_index);
-  std::string argument_tail =
-      split_index < line.size() ? line.substr(split_index + 1) : std::string();
-  return {std::move(command), std::move(argument_tail)};
+  if (const auto split = SplitFirst(line, ' ')) {
+    return {std::string(split->first), std::string(split->second)};
+  }
+  return {line, {}};
 }
 
 struct CommandWaitResult {
   bool done;
   CommandLineSplit command_line;
+};
+
+struct ControllerDemoState {
+  DemoReceiverObserver receiver_observer;
+  DemoRequestDelegate request_delegate;
+  DemoConnectionDelegate connection_delegate;
+  Controller::ReceiverWatch watch;
+  Controller::ConnectRequest connect_request;
+};
+
+struct PublisherDemoState {
+  DemoConnectionServiceObserver server_observer;
+  DemoPublisherObserver publisher_observer;
+  DemoReceiverDelegate receiver_delegate;
+
+  explicit PublisherDemoState(Receiver* receiver)
+      : receiver_delegate(receiver) {}
 };
 
 CommandWaitResult WaitForCommand(pollfd* pollfd) {
@@ -406,12 +424,9 @@ CommandWaitResult WaitForCommand(pollfd* pollfd) {
   return {true};
 }
 
-void RunControllerPollLoop(Controller* controller) {
-  DemoReceiverObserver receiver_observer;
-  DemoRequestDelegate request_delegate;
-  DemoConnectionDelegate connection_delegate;
-  Controller::ReceiverWatch watch;
-  Controller::ConnectRequest connect_request;
+void RunControllerPollLoop(std::shared_ptr<Controller> controller) {
+  auto& task_runner = PlatformClientPosix::GetInstance()->GetTaskRunner();
+  auto state = std::make_shared<ControllerDemoState>();
 
   pollfd stdin_pollfd{STDIN_FILENO, POLLIN};
   while (true) {
@@ -422,38 +437,51 @@ void RunControllerPollLoop(Controller* controller) {
       break;
     }
 
-    if (command_result.command_line.command == "connect") {
-      controller->BuildConnection(command_result.command_line.argument_tail);
-    } else if (command_result.command_line.command == "avail") {
-      watch = controller->RegisterReceiverWatch(
-          {std::string(command_result.command_line.argument_tail)},
-          &receiver_observer);
-    } else if (command_result.command_line.command == "start") {
-      const std::string_view& argument_tail =
-          command_result.command_line.argument_tail;
-      size_t next_split = argument_tail.find_first_of(' ');
-      const std::string& instance_name = receiver_observer.GetInstanceName(
-          std::string(argument_tail.substr(next_split + 1)));
-      const std::string url =
-          static_cast<std::string>(argument_tail.substr(0, next_split));
-      connect_request = controller->StartPresentation(
-          url, instance_name, &request_delegate, &connection_delegate);
-    } else if (command_result.command_line.command == "msg") {
-      request_delegate.connection()->SendString(
-          command_result.command_line.argument_tail);
-    } else if (command_result.command_line.command == "close") {
-      request_delegate.connection()->Close(Connection::CloseReason::kClosed);
-    } else if (command_result.command_line.command == "reconnect") {
-      connect_request = controller->ReconnectConnection(
-          std::move(request_delegate.connection()), &request_delegate);
-    } else if (command_result.command_line.command == "term") {
-      request_delegate.connection()->Terminate(
-          TerminationSource::kController,
-          TerminationReason::kApplicationTerminated);
-    }
+    task_runner.PostTask([controller, state, command_result] {
+      const auto& command = command_result.command_line.command;
+      const auto& argument_tail = command_result.command_line.argument_tail;
+      Connection* connection = state->request_delegate.connection().get();
+
+      if (command == "connect") {
+        controller->BuildConnection(argument_tail);
+      } else if (command == "avail") {
+        state->watch = controller->RegisterReceiverWatch(
+            {std::string(argument_tail)}, &state->receiver_observer);
+      } else if (command == "start") {
+        if (const auto split = SplitFirst(argument_tail, ' ')) {
+          const std::string& instance_name =
+              state->receiver_observer.GetInstanceName(
+                  std::string(split->second));
+          state->connect_request = controller->StartPresentation(
+              std::string(split->first), instance_name,
+              &state->request_delegate, &state->connection_delegate);
+        }
+      } else if (command == "msg") {
+        if (connection) {
+          connection->SendString(argument_tail);
+        }
+      } else if (command == "close") {
+        if (connection) {
+          connection->Close(Connection::CloseReason::kClosed);
+        }
+      } else if (command == "reconnect") {
+        if (connection) {
+          state->connect_request = controller->ReconnectConnection(
+              std::move(state->request_delegate.connection()),
+              &state->request_delegate);
+        }
+      } else if (command == "term") {
+        if (connection) {
+          connection->Terminate(TerminationSource::kController,
+                                TerminationReason::kApplicationTerminated);
+        }
+      } else if (!command.empty()) {
+        OSP_LOG_ERROR << "Received unknown controller command: " << command;
+      }
+    });
   }
 
-  watch.Reset();
+  state->watch.Reset();
 }
 
 void ListenerDemo() {
@@ -488,21 +516,31 @@ void ListenerDemo() {
   auto* network_service =
       NetworkServiceManager::Create(std::move(service_listener), nullptr,
                                     std::move(connection_client), nullptr);
-  auto controller = std::make_unique<Controller>(Clock::now);
+  auto controller = std::make_shared<Controller>(Clock::now);
 
-  network_service->GetServiceListener()->Start();
-  network_service->GetProtocolConnectionClient()->Start();
+  auto& task_runner = PlatformClientPosix::GetInstance()->GetTaskRunner();
+  task_runner.PostTask([network_service] {
+    network_service->GetServiceListener()->Start();
+    network_service->GetProtocolConnectionClient()->Start();
+  });
 
-  RunControllerPollLoop(controller.get());
+  RunControllerPollLoop(controller);
 
   controller.reset();
-  network_service->GetServiceListener()->Stop();
-  network_service->GetProtocolConnectionClient()->Stop();
-  NetworkServiceManager::Dispose();
+  std::promise<void> done_promise;
+  std::future<void> done_future = done_promise.get_future();
+  task_runner.PostTask([network_service, &done_promise] {
+    network_service->GetServiceListener()->Stop();
+    network_service->GetProtocolConnectionClient()->Stop();
+    NetworkServiceManager::Dispose();
+    done_promise.set_value();
+  });
+  done_future.wait();
 }
 
 void RunReceiverPollLoop(NetworkServiceManager* manager,
-                         DemoReceiverDelegate& delegate) {
+                         std::shared_ptr<PublisherDemoState> state) {
+  auto& task_runner = PlatformClientPosix::GetInstance()->GetTaskRunner();
   pollfd stdin_pollfd{STDIN_FILENO, POLLIN};
   while (true) {
     OSP_CHECK_EQ(write(STDOUT_FILENO, "$ ", 2), 2);
@@ -512,29 +550,39 @@ void RunReceiverPollLoop(NetworkServiceManager* manager,
       break;
     }
 
-    if (command_result.command_line.command == "avail") {
-      ServicePublisher* publisher = manager->GetServicePublisher();
-      OSP_LOG_INFO << "publisher->state() == "
-                   << static_cast<int>(publisher->state());
+    task_runner.PostTask([manager, state, command_result] {
+      const auto& command = command_result.command_line.command;
+      const auto& argument_tail = command_result.command_line.argument_tail;
+      Connection* connection = state->receiver_delegate.connection().get();
 
-      if (publisher->state() == ServicePublisher::State::kSuspended) {
-        publisher->Resume();
-      } else {
-        publisher->Suspend();
+      if (command == "avail") {
+        ServicePublisher* publisher = manager->GetServicePublisher();
+        OSP_LOG_INFO << "publisher->state() == "
+                     << static_cast<int>(publisher->state());
+
+        if (publisher->state() == ServicePublisher::State::kSuspended) {
+          publisher->Resume();
+        } else {
+          publisher->Suspend();
+        }
+      } else if (command == "close") {
+        if (connection) {
+          connection->Close(Connection::CloseReason::kClosed);
+        }
+      } else if (command == "msg") {
+        if (connection) {
+          connection->SendString(argument_tail);
+        }
+      } else if (command == "term") {
+        if (state->receiver_delegate.receiver()) {
+          state->receiver_delegate.receiver()->OnPresentationTerminated(
+              state->receiver_delegate.presentation_id(),
+              TerminationSource::kReceiver, TerminationReason::kUserTerminated);
+        }
+      } else if (!command.empty()) {
+        OSP_LOG_ERROR << "Received unknown receiver command: " << command;
       }
-    } else if (command_result.command_line.command == "close") {
-      delegate.connection()->Close(Connection::CloseReason::kClosed);
-    } else if (command_result.command_line.command == "msg") {
-      delegate.connection()->SendString(
-          command_result.command_line.argument_tail);
-    } else if (command_result.command_line.command == "term") {
-      delegate.receiver()->OnPresentationTerminated(
-          delegate.presentation_id(), TerminationSource::kReceiver,
-          TerminationReason::kUserTerminated);
-    } else {
-      OSP_LOG_FATAL << "Received unknown receiver command: "
-                    << command_result.command_line.command;
-    }
+    });
   }
 }
 
@@ -579,22 +627,31 @@ void PublisherDemo(std::string_view friendly_name) {
       NetworkServiceManager::Create(nullptr, std::move(service_publisher),
                                     nullptr, std::move(connection_server));
   auto receiver = std::make_unique<Receiver>();
-  DemoReceiverDelegate receiver_delegate(receiver.get());
+  auto state = std::make_shared<PublisherDemoState>(receiver.get());
   receiver->Init();
-  receiver->SetReceiverDelegate(&receiver_delegate);
+  receiver->SetReceiverDelegate(&state->receiver_delegate);
 
-  network_service->GetServicePublisher()->Start();
-  network_service->GetProtocolConnectionServer()->Start();
+  auto& task_runner = PlatformClientPosix::GetInstance()->GetTaskRunner();
+  task_runner.PostTask([network_service] {
+    network_service->GetServicePublisher()->Start();
+    network_service->GetProtocolConnectionServer()->Start();
+  });
 
-  RunReceiverPollLoop(network_service, receiver_delegate);
+  RunReceiverPollLoop(network_service, state);
 
-  receiver_delegate.connection().reset();
+  state->receiver_delegate.connection().reset();
   receiver->SetReceiverDelegate(nullptr);
   receiver->Deinit();
 
-  network_service->GetServicePublisher()->Stop();
-  network_service->GetProtocolConnectionServer()->Stop();
-  NetworkServiceManager::Dispose();
+  std::promise<void> done_promise;
+  std::future<void> done_future = done_promise.get_future();
+  task_runner.PostTask([network_service, &done_promise] {
+    network_service->GetServicePublisher()->Stop();
+    network_service->GetProtocolConnectionServer()->Stop();
+    NetworkServiceManager::Dispose();
+    done_promise.set_value();
+  });
+  done_future.wait();
 }
 
 }  // namespace openscreen::osp

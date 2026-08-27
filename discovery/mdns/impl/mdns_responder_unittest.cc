@@ -5,6 +5,7 @@
 #include "discovery/mdns/impl/mdns_responder.h"
 
 #include <utility>
+#include <variant>
 
 #include "discovery/common/config.h"
 #include "discovery/mdns/impl/mdns_probe_manager.h"
@@ -33,7 +34,7 @@ void CheckSingleNsecRecordType(const MdnsMessage& message, DnsType type) {
   const MdnsRecord record = message.answers()[0];
 
   ASSERT_EQ(record.dns_type(), DnsType::kNSEC);
-  const NsecRecordRdata& rdata = absl::get<NsecRecordRdata>(record.rdata());
+  const NsecRecordRdata& rdata = std::get<NsecRecordRdata>(record.rdata());
 
   ASSERT_EQ(rdata.types().size(), size_t{1});
   EXPECT_EQ(rdata.types()[0], type);
@@ -41,7 +42,7 @@ void CheckSingleNsecRecordType(const MdnsMessage& message, DnsType type) {
 
 void CheckPtrDomain(const MdnsRecord& record, const DomainName& domain) {
   ASSERT_EQ(record.dns_type(), DnsType::kPTR);
-  const PtrRecordRdata& rdata = absl::get<PtrRecordRdata>(record.rdata());
+  const PtrRecordRdata& rdata = std::get<PtrRecordRdata>(record.rdata());
 
   EXPECT_EQ(rdata.ptr_domain(), domain);
 }
@@ -53,7 +54,7 @@ void ExpectContainsNsecRecordType(const std::vector<MdnsRecord>& records,
       return false;
     }
 
-    const NsecRecordRdata& rdata = absl::get<NsecRecordRdata>(record.rdata());
+    const NsecRecordRdata& rdata = std::get<NsecRecordRdata>(record.rdata());
     return rdata.types().size() == 1 && rdata.types()[0] == type;
   }));
 }
@@ -62,7 +63,6 @@ void ExpectContainsNsecRecordType(const std::vector<MdnsRecord>& records,
 
 using testing::_;
 using testing::Args;
-using testing::Invoke;
 using testing::Return;
 using testing::StrictMock;
 
@@ -70,7 +70,10 @@ class MockRecordHandler : public MdnsResponder::RecordHandler {
  public:
   void AddRecord(MdnsRecord record) { records_.push_back(record); }
 
-  MOCK_METHOD3(HasRecords, bool(const DomainName&, DnsType, DnsClass));
+  MOCK_METHOD(bool,
+              HasRecords,
+              (const DomainName&, DnsType, DnsClass),
+              (override));
 
   std::vector<MdnsRecord::ConstRef> GetRecords(const DomainName& name,
                                                DnsType type,
@@ -104,16 +107,20 @@ class MockMdnsSender : public MdnsSender {
  public:
   explicit MockMdnsSender(UdpSocket& socket) : MdnsSender(socket) {}
 
-  MOCK_METHOD1(SendMulticast, Error(const MdnsMessage& message));
-  MOCK_METHOD2(SendMessage,
-               Error(const MdnsMessage& message, const IPEndpoint& endpoint));
+  MOCK_METHOD(Error, SendMulticast, (const MdnsMessage& message), (override));
+  MOCK_METHOD(Error,
+              SendMessage,
+              (const MdnsMessage& message, const IPEndpoint& endpoint),
+              (override));
 };
 
 class MockProbeManager : public MdnsProbeManager {
  public:
-  MOCK_CONST_METHOD1(IsDomainClaimed, bool(const DomainName&));
-  MOCK_METHOD2(RespondToProbeQuery,
-               void(const MdnsMessage&, const IPEndpoint&));
+  MOCK_METHOD(bool, IsDomainClaimed, (const DomainName&), (const, override));
+  MOCK_METHOD(void,
+              RespondToProbeQuery,
+              (const MdnsMessage&, const IPEndpoint&),
+              (override));
 };
 
 class MdnsResponderTest : public testing::Test {

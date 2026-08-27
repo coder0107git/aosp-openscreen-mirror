@@ -5,6 +5,7 @@
 #include "discovery/dnssd/impl/publisher_impl.h"
 
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "discovery/common/testing/mock_reporting_client.h"
@@ -23,8 +24,10 @@ using testing::StrictMock;
 
 class MockClient : public DnsSdPublisher::Client {
  public:
-  MOCK_METHOD2(OnEndpointClaimed,
-               void(const DnsSdInstance&, const DnsSdInstanceEndpoint&));
+  MOCK_METHOD(void,
+              OnEndpointClaimed,
+              (const DnsSdInstance&, const DnsSdInstanceEndpoint&),
+              (override));
 };
 
 class MockMdnsService : public MdnsService {
@@ -45,12 +48,16 @@ class MockMdnsService : public MdnsService {
 
   void ReinitializeQueries(const DomainName& name) override { FAIL(); }
 
-  MOCK_METHOD3(StartProbe,
-               Error(MdnsDomainConfirmedProvider*, DomainName, IPAddress));
-  MOCK_METHOD2(UpdateRegisteredRecord,
-               Error(const MdnsRecord&, const MdnsRecord&));
-  MOCK_METHOD1(RegisterRecord, Error(const MdnsRecord& record));
-  MOCK_METHOD1(UnregisterRecord, Error(const MdnsRecord& record));
+  MOCK_METHOD(Error,
+              StartProbe,
+              (MdnsDomainConfirmedProvider*, DomainName, IPAddress),
+              (override));
+  MOCK_METHOD(Error,
+              UpdateRegisteredRecord,
+              (const MdnsRecord&, const MdnsRecord&),
+              (override));
+  MOCK_METHOD(Error, RegisterRecord, (const MdnsRecord& record), (override));
+  MOCK_METHOD(Error, UnregisterRecord, (const MdnsRecord& record), (override));
 };
 
 class PublisherImplTest : public testing::Test {
@@ -98,13 +105,12 @@ TEST_F(PublisherImplTest, TestRegistrationAndDegrestration) {
       .WillRepeatedly([&seen, &address,
                        &domain2](const MdnsRecord& record) mutable -> Error {
         if (record.dns_type() == DnsType::kA) {
-          const ARecordRdata& data = absl::get<ARecordRdata>(record.rdata());
+          const ARecordRdata& data = std::get<ARecordRdata>(record.rdata());
           if (data.ipv4_address() == address) {
             seen++;
           }
         } else if (record.dns_type() == DnsType::kSRV) {
-          const SrvRecordRdata& data =
-              absl::get<SrvRecordRdata>(record.rdata());
+          const SrvRecordRdata& data = std::get<SrvRecordRdata>(record.rdata());
           if (data.port() == 80) {
             seen++;
           }
@@ -131,13 +137,12 @@ TEST_F(PublisherImplTest, TestRegistrationAndDegrestration) {
       .WillRepeatedly([&seen,
                        &address](const MdnsRecord& record) mutable -> Error {
         if (record.dns_type() == DnsType::kA) {
-          const ARecordRdata& data = absl::get<ARecordRdata>(record.rdata());
+          const ARecordRdata& data = std::get<ARecordRdata>(record.rdata());
           if (data.ipv4_address() == address) {
             seen++;
           }
         } else if (record.dns_type() == DnsType::kSRV) {
-          const SrvRecordRdata& data =
-              absl::get<SrvRecordRdata>(record.rdata());
+          const SrvRecordRdata& data = std::get<SrvRecordRdata>(record.rdata());
           if (data.port() == 80) {
             seen++;
           }

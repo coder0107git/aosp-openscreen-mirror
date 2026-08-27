@@ -13,6 +13,7 @@
 #include "platform/api/udp_socket.h"
 #include "platform/test/fake_clock.h"
 #include "util/osp_logging.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen {
 
@@ -20,10 +21,10 @@ class FakeUdpSocket : public UdpSocket {
  public:
   class MockClient : public UdpSocket::Client {
    public:
-    MOCK_METHOD1(OnBound, void(UdpSocket*));
-    MOCK_METHOD2(OnError, void(UdpSocket*, const Error&));
-    MOCK_METHOD2(OnSendError, void(UdpSocket*, const Error&));
-    MOCK_METHOD2(OnReadInternal, void(UdpSocket*, const ErrorOr<UdpPacket>&));
+    MOCK_METHOD(void, OnBound, (UdpSocket*), (override));
+    MOCK_METHOD(void, OnError, (UdpSocket*, const Error&), (override));
+    MOCK_METHOD(void, OnSendError, (UdpSocket*, const Error&), (override));
+    MOCK_METHOD(void, OnReadInternal, (UdpSocket*, const ErrorOr<UdpPacket>&));
 
     void OnRead(UdpSocket* socket, ErrorOr<UdpPacket> packet) override {
       OnReadInternal(socket, packet);
@@ -75,7 +76,7 @@ class FakeUdpSocket : public UdpSocket {
  private:
   void ProcessConfigurationMethod(std::queue<Error>* errors);
 
-  Client* const client_;
+  const raw_ptr<Client> client_;
   Version version_;
 
   // Queues for the response to calls above

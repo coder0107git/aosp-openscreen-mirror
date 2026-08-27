@@ -18,8 +18,8 @@
 #include "platform/api/time.h"
 #include "platform/base/error.h"
 #include "platform/base/ip_address.h"
-#include "platform/base/macros.h"
 #include "util/osp_logging.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::osp {
 
@@ -172,8 +172,8 @@ class Connection {
 
   PresentationInfo presentation_info_;
   State state_ = State::kConnecting;
-  Delegate* delegate_ = nullptr;
-  Controller* controller_ = nullptr;
+  raw_ptr<Delegate> delegate_ = nullptr;
+  raw_ptr<Controller> controller_ = nullptr;
   std::optional<uint64_t> connection_id_;
   std::optional<uint64_t> instance_id_;
   std::unique_ptr<ProtocolConnection> protocol_connection_;
@@ -206,7 +206,7 @@ class ConnectionManager final : public MessageDemuxer::MessageCallback {
   // TODO(btolsch): Connection IDs were changed to be per-instance, but this
   // table then needs to be <instance id, connection id> since connection id
   // is still not unique globally.
-  std::map<uint64_t, Connection*> connections_;
+  std::map<uint64_t, raw_ptr<Connection>> connections_;
 
   MessageDemuxer::MessageWatch message_watch_;
   MessageDemuxer::MessageWatch close_event_watch_;

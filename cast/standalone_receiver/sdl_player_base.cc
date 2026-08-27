@@ -8,7 +8,7 @@
 #include <sstream>
 #include <utility>
 
-#include "cast/standalone_receiver/avcodec_glue.h"
+#include "cast/standalone_common/ffmpeg_glue.h"
 #include "cast/streaming/public/constants.h"
 #include "cast/streaming/public/encoded_frame.h"
 #include "util/big_endian.h"
@@ -68,7 +68,7 @@ Clock::time_point SDLPlayerBase::ResyncAndDeterminePresentationTime(
   constexpr auto kMaxPlayoutDrift = milliseconds(100);
   const auto media_time_since_last_sync =
       (frame.rtp_timestamp - last_sync_rtp_timestamp_)
-          .ToDuration<Clock::duration>(receiver_.rtp_timebase());
+          .ToDuration<Clock::duration>(receiver_.config().rtp_timebase);
   Clock::time_point presentation_time =
       last_sync_reference_time_ + media_time_since_last_sync;
   const auto drift = to_milliseconds(frame.reference_time - presentation_time);
@@ -88,8 +88,7 @@ Clock::time_point SDLPlayerBase::ResyncAndDeterminePresentationTime(
   return presentation_time;
 }
 
-void SDLPlayerBase::OnFramesReady(int buffer_size) {
-  TRACE_DEFAULT_SCOPED(TraceCategory::kStandaloneReceiver);
+void SDLPlayerBase::OnFramesReady(size_t buffer_size) {
   // Do not consume anything if there are too many frames in the pipeline
   // already.
   if (static_cast<int>(frames_to_render_.size()) > kMaxFramesInPipeline) {
@@ -101,10 +100,14 @@ void SDLPlayerBase::OnFramesReady(int buffer_size) {
   buffer_.Resize(buffer_size);
   EncodedFrame frame = receiver_.ConsumeNextFrame(buffer_.AsByteBuffer());
 
+  TRACE_FLOW_STEP(TraceCategory::kStandaloneReceiver, "Frame.Received",
+                  frame.frame_id);
+
   // Create the tracking state for the frame in the player pipeline.
   OSP_CHECK_EQ(frames_to_render_.count(frame.frame_id), 0);
   PendingFrame& pending_frame = frames_to_render_[frame.frame_id];
   pending_frame.start_time = start_time;
+  pending_frame.rtp_timestamp = frame.rtp_timestamp;
 
   pending_frame.presentation_time = ResyncAndDeterminePresentationTime(frame);
 
@@ -114,7 +117,6 @@ void SDLPlayerBase::OnFramesReady(int buffer_size) {
 }
 
 void SDLPlayerBase::OnFrameDecoded(FrameId frame_id, const AVFrame& frame) {
-  TRACE_DEFAULT_SCOPED(TraceCategory::kStandaloneReceiver);
   const auto it = frames_to_render_.find(frame_id);
   if (it == frames_to_render_.end()) {
     return;
@@ -182,21 +184,28 @@ void SDLPlayerBase::RenderAndSchedulePresentation() {
 
   // Remove the frame from the queue, making it the `current_frame_`. Then,
   // render it and, if successful, schedule its presentation.
+  const FrameId frame_id = it->first;
   current_frame_ = std::move(it->second);
   frames_to_render_.erase(it);
+
+  TRACE_FLOW_STEP(TraceCategory::kStandaloneReceiver, "Frame.Render.Begin",
+                  frame_id);
   const ErrorOr<Clock::time_point> presentation_time =
       RenderNextFrame(current_frame_);
+  TRACE_FLOW_STEP(TraceCategory::kStandaloneReceiver, "Frame.Render.End",
+                  frame_id);
   if (!presentation_time) {
     OnFatalError(presentation_time.error().message());
     return;
   }
   state_ = kScheduledToPresent;
   presentation_alarm_.Schedule(
-      [this] {
+      [this, frame_id, rtp_timestamp = current_frame_.rtp_timestamp] {
         Present();
         if (state_ == kScheduledToPresent) {
           state_ = kPresented;
         }
+        receiver_.ReportPlayoutEvent(frame_id, rtp_timestamp, now_());
         ResumeRendering();
       },
       presentation_time.value());
@@ -221,9 +230,10 @@ void SDLPlayerBase::RenderAndSchedulePresentation() {
 void SDLPlayerBase::ResumeDecoding() {
   decode_alarm_.Schedule(
       [this] {
-        const int buffer_size = receiver_.AdvanceToNextFrame();
-        if (buffer_size != Receiver::kNoFramesReady) {
-          OnFramesReady(buffer_size);
+        const std::optional<size_t> buffer_size =
+            receiver_.AdvanceToNextFrame();
+        if (buffer_size) {
+          OnFramesReady(*buffer_size);
         }
       },
       Alarm::kImmediately);

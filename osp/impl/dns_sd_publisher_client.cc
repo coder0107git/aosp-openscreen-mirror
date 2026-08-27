@@ -12,7 +12,6 @@
 #include "discovery/public/dns_sd_service_factory.h"
 #include "osp/public/osp_constants.h"
 #include "osp/public/service_info.h"
-#include "platform/base/macros.h"
 #include "util/osp_logging.h"
 
 namespace openscreen::osp {
@@ -114,7 +113,7 @@ discovery::DnsSdServicePtr DnsSdPublisherClient::CreateDnsSdServiceInternal(
   // discovery::DnsSdService, e.g. through a ref-counting handle, so that the
   // OSP publisher and the OSP listener don't have to coordinate through an
   // additional object.
-  return CreateDnsSdService(task_runner_, *this, dns_sd_config);
+  return CreateDnsSdService(*task_runner_, *this, dns_sd_config);
 }
 
 }  // namespace openscreen::osp

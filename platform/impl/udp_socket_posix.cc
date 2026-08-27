@@ -15,15 +15,19 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "build/build_config.h"
+#include "platform/api/network_interface.h"
 #include "platform/api/task_runner.h"
 #include "platform/base/error.h"
+#include "platform/impl/socket_address_posix.h"
 #include "platform/impl/udp_socket_reader_posix.h"
 #include "util/osp_logging.h"
 
@@ -140,9 +144,7 @@ IPEndpoint UdpSocketPosix::GetLocalEndpoint() const {
                         reinterpret_cast<struct sockaddr*>(&address),
                         &address_len) == 0) {
           OSP_CHECK_EQ(address.sin_family, AF_INET);
-          local_endpoint_.address =
-              IPAddress(IPAddress::Version::kV4,
-                        reinterpret_cast<uint8_t*>(&address.sin_addr.s_addr));
+          local_endpoint_.address = GetIPAddressFromSockAddr(address);
           local_endpoint_.port = ntohs(address.sin_port);
         }
         break;
@@ -155,9 +157,7 @@ IPEndpoint UdpSocketPosix::GetLocalEndpoint() const {
                         reinterpret_cast<struct sockaddr*>(&address),
                         &address_len) == 0) {
           OSP_CHECK_EQ(address.sin6_family, AF_INET6);
-          local_endpoint_.address =
-              IPAddress(IPAddress::Version::kV6,
-                        reinterpret_cast<uint8_t*>(&address.sin6_addr));
+          local_endpoint_.address = GetIPAddressFromSockAddr(address);
           local_endpoint_.port = ntohs(address.sin6_port);
         }
         break;
@@ -169,6 +169,7 @@ IPEndpoint UdpSocketPosix::GetLocalEndpoint() const {
 }
 
 void UdpSocketPosix::Bind() {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   if (is_closed()) {
     OnError(Error::Code::kSocketClosedFailure);
     return;
@@ -196,11 +197,7 @@ void UdpSocketPosix::Bind() {
   bool is_bound = false;
   switch (local_endpoint_.address.version()) {
     case UdpSocket::Version::kV4: {
-      struct sockaddr_in address {};
-      address.sin_family = AF_INET;
-      address.sin_port = htons(local_endpoint_.port);
-      local_endpoint_.address.CopyToV4(
-          reinterpret_cast<uint8_t*>(&address.sin_addr.s_addr));
+      struct sockaddr_in address = ToSockAddrIn(local_endpoint_);
       if (bind(handle_.fd, reinterpret_cast<struct sockaddr*>(&address),
                sizeof(address)) != -1) {
         is_bound = true;
@@ -208,11 +205,7 @@ void UdpSocketPosix::Bind() {
     } break;
 
     case UdpSocket::Version::kV6: {
-      struct sockaddr_in6 address {};
-      address.sin6_family = AF_INET6;
-      address.sin6_port = htons(local_endpoint_.port);
-      local_endpoint_.address.CopyToV6(
-          reinterpret_cast<uint8_t*>(&address.sin6_addr));
+      struct sockaddr_in6 address = ToSockAddrIn6(local_endpoint_);
       if (bind(handle_.fd, reinterpret_cast<struct sockaddr*>(&address),
                sizeof(address)) != -1) {
         is_bound = true;
@@ -229,6 +222,7 @@ void UdpSocketPosix::Bind() {
 
 void UdpSocketPosix::SetMulticastOutboundInterface(
     NetworkInterfaceIndex ifindex) {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   if (is_closed()) {
     OnError(Error::Code::kSocketClosedFailure);
     return;
@@ -265,6 +259,7 @@ void UdpSocketPosix::SetMulticastOutboundInterface(
 
 void UdpSocketPosix::JoinMulticastGroup(const IPAddress& address,
                                         NetworkInterfaceIndex ifindex) {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   if (is_closed()) {
     OnError(Error::Code::kSocketClosedFailure);
     return;
@@ -285,10 +280,32 @@ void UdpSocketPosix::JoinMulticastGroup(const IPAddress& address,
       multicast_properties.imr_address.s_addr = INADDR_ANY;
       multicast_properties.imr_ifindex =
           static_cast<IPv4NetworkInterfaceIndex>(ifindex);
+
+#if BUILDFLAG(IS_APPLE)
+      // On macOS, we must specify the interface address, not just the index,
+      // because it ignores imr_ifindex in ip_mreqn (interpreting it as
+      // ip_mreq).
+      const std::vector<InterfaceInfo> interfaces = GetNetworkInterfaces();
+      const auto it = std::find_if(interfaces.begin(), interfaces.end(),
+                                   [ifindex](const InterfaceInfo& info) {
+                                     return info.index == ifindex;
+                                   });
+
+      if (it != interfaces.end()) {
+        for (const auto& ip_net : it->addresses) {
+          if (ip_net.address.version() == IPAddress::Version::kV4) {
+            ip_net.address.CopyToV4(
+                reinterpret_cast<uint8_t*>(&multicast_properties.imr_address));
+            break;
+          }
+        }
+      }
+#endif
+
       static_assert(sizeof(multicast_properties.imr_multiaddr) == 4u,
                     "IPv4 address requires exactly 4 bytes");
-      address.CopyToV4(
-          reinterpret_cast<uint8_t*>(&multicast_properties.imr_multiaddr));
+      address.CopyTo(std::span<uint8_t>(
+          reinterpret_cast<uint8_t*>(&multicast_properties.imr_multiaddr), 4));
       if (setsockopt(handle_.fd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
                      &multicast_properties,
                      sizeof(multicast_properties)) == -1) {
@@ -312,8 +329,9 @@ void UdpSocketPosix::JoinMulticastGroup(const IPAddress& address,
       };
       static_assert(sizeof(multicast_properties.ipv6mr_multiaddr) == 16u,
                     "IPv6 address requires exactly 16 bytes");
-      address.CopyToV6(
-          reinterpret_cast<uint8_t*>(&multicast_properties.ipv6mr_multiaddr));
+      address.CopyTo(std::span<uint8_t>(
+          reinterpret_cast<uint8_t*>(&multicast_properties.ipv6mr_multiaddr),
+          16));
       // Portability note: All platforms support IPV6_JOIN_GROUP, which is
       // synonymous with IPV6_ADD_MEMBERSHIP.
       if (setsockopt(handle_.fd, IPPROTO_IPV6, IPV6_JOIN_GROUP,
@@ -340,30 +358,21 @@ Error ChooseError(decltype(errno) posix_errno, Error::Code hard_error_code) {
   return Error(hard_error_code, strerror(errno));
 }
 
-IPAddress GetIPAddressFromSockAddr(const sockaddr_in& sa) {
-  static_assert(IPAddress::kV4Size == sizeof(sa.sin_addr.s_addr),
-                "IPv4 address size mismatch.");
-  return IPAddress(IPAddress::Version::kV4,
-                   reinterpret_cast<const uint8_t*>(&sa.sin_addr.s_addr));
-}
-
 IPAddress GetIPAddressFromPktInfo(const in_pktinfo& pktinfo) {
   static_assert(IPAddress::kV4Size == sizeof(pktinfo.ipi_addr),
                 "IPv4 address size mismatch.");
   return IPAddress(IPAddress::Version::kV4,
-                   reinterpret_cast<const uint8_t*>(&pktinfo.ipi_addr));
+                   std::span<const uint8_t>(
+                       reinterpret_cast<const uint8_t*>(&pktinfo.ipi_addr), 4));
 }
 
 uint16_t GetPortFromFromSockAddr(const sockaddr_in& sa) {
   return ntohs(sa.sin_port);
 }
 
-IPAddress GetIPAddressFromSockAddr(const sockaddr_in6& sa) {
-  return IPAddress(IPAddress::Version::kV6, sa.sin6_addr.s6_addr);
-}
-
 IPAddress GetIPAddressFromPktInfo(const in6_pktinfo& pktinfo) {
-  return IPAddress(IPAddress::Version::kV6, pktinfo.ipi6_addr.s6_addr);
+  return IPAddress(std::span<const uint8_t, 16>(pktinfo.ipi6_addr.s6_addr, 16),
+                   pktinfo.ipi6_ifindex);
 }
 
 uint16_t GetPortFromFromSockAddr(const sockaddr_in6& sa) {
@@ -471,9 +480,9 @@ void UdpSocketPosix::ReceiveMessage() {
   // calling into all the other methods.
 
   if (is_closed()) {
-    task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr()] {
+    task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr()] {
       if (auto* self = weak_this.get()) {
-        if (auto* client = self->client_) {
+        if (auto* client = self->client_.get()) {
           client->OnRead(self, Error::Code::kSocketClosedFailure);
         }
       }
@@ -497,10 +506,10 @@ void UdpSocketPosix::ReceiveMessage() {
     }
   }
 
-  task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr(),
-                         result = std::move(read_result)]() mutable {
+  task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr(),
+                          result = std::move(read_result)]() mutable {
     if (auto* self = weak_this.get()) {
-      if (auto* client = self->client_) {
+      if (auto* client = self->client_.get()) {
         client->OnRead(self, std::move(result));
       }
     }
@@ -508,6 +517,7 @@ void UdpSocketPosix::ReceiveMessage() {
 }
 
 void UdpSocketPosix::SendMessage(ByteView data, const IPEndpoint& dest) {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   if (is_closed()) {
     if (client_) {
       client_->OnSendError(this, Error::Code::kSocketClosedFailure);
@@ -525,12 +535,13 @@ void UdpSocketPosix::SendMessage(ByteView data, const IPEndpoint& dest) {
   msg.msg_flags = 0;
 
   ssize_t num_bytes_sent = -2;
-  switch (local_endpoint_.address.version()) {
+  switch (dest.address.version()) {
     case UdpSocket::Version::kV4: {
       struct sockaddr_in sa {};
       sa.sin_family = AF_INET;
       sa.sin_port = htons(dest.port);
-      dest.address.CopyToV4(reinterpret_cast<uint8_t*>(&sa.sin_addr.s_addr));
+      dest.address.CopyTo(std::span<uint8_t>(
+          reinterpret_cast<uint8_t*>(&sa.sin_addr.s_addr), 4));
       msg.msg_name = &sa;
       msg.msg_namelen = sizeof(sa);
       num_bytes_sent = sendmsg(handle_.fd, &msg, 0);
@@ -541,7 +552,11 @@ void UdpSocketPosix::SendMessage(ByteView data, const IPEndpoint& dest) {
       struct sockaddr_in6 sa {};
       sa.sin6_family = AF_INET6;
       sa.sin6_port = htons(dest.port);
-      dest.address.CopyToV6(reinterpret_cast<uint8_t*>(&sa.sin6_addr.s6_addr));
+      dest.address.CopyTo(std::span<uint8_t>(
+          reinterpret_cast<uint8_t*>(&sa.sin6_addr.s6_addr), 16));
+      if (dest.address.IsLinkLocal() && dest.address.GetScopeId() != 0) {
+        sa.sin6_scope_id = dest.address.GetScopeId();
+      }
       msg.msg_name = &sa;
       msg.msg_namelen = sizeof(sa);
       num_bytes_sent = sendmsg(handle_.fd, &msg, 0);
@@ -561,26 +576,73 @@ void UdpSocketPosix::SendMessage(ByteView data, const IPEndpoint& dest) {
   OSP_CHECK_EQ(static_cast<size_t>(num_bytes_sent), data.size());
 }
 
-void UdpSocketPosix::SetDscp(UdpSocket::DscpMode state) {
+void UdpSocketPosix::SetDscp(UdpSocket::DscpMode mode) {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   if (is_closed()) {
     OnError(Error::Code::kSocketClosedFailure);
     return;
   }
 
-  constexpr auto kSettingLevel = IPPROTO_IP;
-  uint8_t code_array[1] = {static_cast<uint8_t>(state)};
-  auto code = setsockopt(handle_.fd, kSettingLevel, IP_TOS, code_array,
-                         sizeof(uint8_t));
+  int level;
+  int option;
+  switch (local_endpoint_.address.version()) {
+    case UdpSocket::Version::kV4:
+      level = IPPROTO_IP;
+      option = IP_TOS;
+      break;
+    case UdpSocket::Version::kV6:
+      level = IPPROTO_IPV6;
+      option = IPV6_TCLASS;
+      break;
+  }
 
-  if (code == EBADF || code == ENOTSOCK || code == EFAULT) {
-    OSP_VLOG << "BAD SOCKET PROVIDED. CODE: " << code;
+  // The DSCP value is a 6-bit field, while the IP_TOS and IPV6_TCLASS fields
+  // are 8-bit fields that expect the DSCP value in the six most significant
+  // digits.
+  const int value = static_cast<int>(mode) << 2;
+  if (setsockopt(handle_.fd, level, option, &value, sizeof(value)) == -1) {
     OnError(Error::Code::kSocketOptionSettingFailure);
-  } else if (code == EINVAL) {
-    OSP_VLOG << "INVALID DSCP INFO PROVIDED";
-    OnError(Error::Code::kSocketOptionSettingFailure);
-  } else if (code == ENOPROTOOPT) {
-    OSP_VLOG << "INVALID DSCP SETTING LEVEL PROVIDED: " << kSettingLevel;
-    OnError(Error::Code::kSocketOptionSettingFailure);
+    return;
+  }
+
+  OSP_DVLOG << __func__ << ": successfully set DSCP to "
+            << static_cast<int>(mode);
+}
+
+void UdpSocketPosix::SetReceiveBufferSize(size_t size) {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
+  if (is_closed()) {
+    OnError(Error::Code::kSocketClosedFailure);
+    return;
+  }
+  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    OSP_LOG_WARN << "Requested SO_RCVBUF size exceeds int max: " << size;
+    return;
+  }
+  // UDP is connectionless and allows setting SO_RCVBUF / SO_SNDBUF at any time
+  // after socket creation.  Changes take effect immediately for subsequent
+  // datagrams.
+  const int int_size = static_cast<int>(size);
+  if (setsockopt(handle_.fd, SOL_SOCKET, SO_RCVBUF, &int_size,
+                 sizeof(int_size)) == -1) {
+    OSP_LOG_WARN << "Failed to set SO_RCVBUF to " << size;
+  }
+}
+
+void UdpSocketPosix::SetSendBufferSize(size_t size) {
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
+  if (is_closed()) {
+    OnError(Error::Code::kSocketClosedFailure);
+    return;
+  }
+  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    OSP_LOG_WARN << "Requested SO_SNDBUF size exceeds int max: " << size;
+    return;
+  }
+  const int int_size = static_cast<int>(size);
+  if (setsockopt(handle_.fd, SOL_SOCKET, SO_SNDBUF, &int_size,
+                 sizeof(int_size)) == -1) {
+    OSP_LOG_WARN << "Failed to set SO_SNDBUF to " << size;
   }
 }
 

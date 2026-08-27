@@ -15,6 +15,7 @@
 #include "quiche/quic/core/quic_crypto_stream.h"
 #include "quiche/quic/core/quic_session.h"
 #include "quiche/quic/core/quic_types.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::osp {
 
@@ -33,7 +34,7 @@ class OpenScreenSessionBase : public quic::QuicSession {
     virtual void OnCryptoHandshakeComplete() = 0;
     virtual void OnIncomingStream(QuicStream* stream) = 0;
     virtual void OnClientCertificates(
-        const std::vector<std::string>& certs) = 0;
+        const std::vector<std::string_view>& certs) = 0;
     virtual QuicConnection::Delegate& GetConnectionDelegate() = 0;
     virtual uint64_t GetInstanceID() = 0;
   };
@@ -57,11 +58,11 @@ class OpenScreenSessionBase : public quic::QuicSession {
   // This will offer the custom ALPN.
   std::vector<std::string> GetAlpnsToOffer() const override;
   // This will select the custom ALPN.
-  std::vector<absl::string_view>::const_iterator SelectAlpn(
-      const std::vector<absl::string_view>& alpns) const override;
+  std::vector<std::string_view>::const_iterator SelectAlpn(
+      const std::vector<std::string_view>& alpns) const override;
 
   QuicStream* CreateOutgoingStream(QuicStream::Delegate& delegate);
-  Visitor& visitor() { return visitor_; }
+  Visitor& visitor() { return *visitor_; }
 
  protected:
   virtual std::unique_ptr<quic::QuicCryptoStream> CreateCryptoStream() = 0;
@@ -74,7 +75,6 @@ class OpenScreenSessionBase : public quic::QuicSession {
     return crypto_stream_.get();
   }
   quic::QuicStream* CreateIncomingStream(quic::QuicStreamId id) override;
-  quic::QuicStream* CreateIncomingStream(quic::PendingStream* pending) override;
   bool ShouldKeepConnectionAlive() const override;
 
   std::unique_ptr<quic::QuicConnection> connection_;
@@ -82,7 +82,7 @@ class OpenScreenSessionBase : public quic::QuicSession {
  private:
   // Used for the crypto handshake.
   std::unique_ptr<quic::QuicCryptoStream> crypto_stream_;
-  Visitor& visitor_;
+  const raw_ref<Visitor> visitor_;
 };
 
 }  // namespace openscreen::osp

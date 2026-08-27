@@ -16,6 +16,8 @@
 #include "platform/api/udp_socket.h"
 #include "platform/base/ip_address.h"
 #include "platform/base/span.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::cast {
 
@@ -78,7 +80,7 @@ class Environment : public UdpSocket::Client {
 
   ClockNowFunctionPtr now_function() const { return now_function_; }
   Clock::time_point now() const { return now_function_(); }
-  TaskRunner& task_runner() const { return task_runner_; }
+  TaskRunner& task_runner() const { return *task_runner_; }
 
   // Returns the local endpoint the socket is bound to, or the zero IPEndpoint
   // if socket creation/binding failed.
@@ -106,7 +108,9 @@ class Environment : public UdpSocket::Client {
   // nullptr. Note that if the collector is destroyed before the environment,
   // callers MUST unsubscribe to avoid an access exception.
   void SetStatisticsCollector(StatisticsCollector* subscriber);
-  StatisticsCollector* statistics_collector() { return statistics_collector_; }
+  StatisticsCollector* statistics_collector() {
+    return statistics_collector_.get();
+  }
 
   // Start/Resume delivery of incoming packets to the given `packet_consumer`.
   // Delivery will continue until DropIncomingPackets() is called.
@@ -120,6 +124,15 @@ class Environment : public UdpSocket::Client {
   // Returns the maximum packet size for the network. This will always return a
   // value of at least kRequiredNetworkPacketSize.
   int GetMaxPacketSize() const;
+
+  // Sets the DSCP value for the underlying UDP socket.
+  void SetDscp(UdpSocket::DscpMode mode);
+
+  // Sets the receive and send buffer sizes for the underlying UDP socket.
+  // These should typically be called during session initialization before
+  // streaming begins.
+  virtual void SetReceiveBufferSize(size_t size);
+  virtual void SetSendBufferSize(size_t size);
 
   // Sends the given `packet` to the remote endpoint, best-effort.
   // set_remote_endpoint() must be called beforehand with a valid IPEndpoint.
@@ -136,7 +149,7 @@ class Environment : public UdpSocket::Client {
   void OnRead(UdpSocket* socket, ErrorOr<UdpPacket> packet_or_error) final;
 
   ClockNowFunctionPtr now_function_;
-  TaskRunner& task_runner_;
+  const raw_ref<TaskRunner> task_runner_;
 
   // The UDP socket bound to the local endpoint that was passed into the
   // constructor, or null if socket creation failed.
@@ -146,10 +159,10 @@ class Environment : public UdpSocket::Client {
   // method comments above.
   IPEndpoint local_endpoint_{};
   IPEndpoint remote_endpoint_{};
-  PacketConsumer* packet_consumer_ = nullptr;
+  raw_ptr<PacketConsumer> packet_consumer_ = nullptr;
   SocketState state_ = SocketState::kStarting;
-  SocketSubscriber* socket_subscriber_ = nullptr;
-  StatisticsCollector* statistics_collector_ = nullptr;
+  raw_ptr<SocketSubscriber> socket_subscriber_ = nullptr;
+  raw_ptr<StatisticsCollector> statistics_collector_ = nullptr;
 };
 
 }  // namespace openscreen::cast

@@ -11,6 +11,7 @@
 
 #include "osp/impl/quic/quic_connection_factory_base.h"
 #include "quiche/quic/core/crypto/quic_crypto_server_config.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::osp {
 
@@ -49,11 +50,12 @@ class QuicConnectionFactoryServer : public QuicConnectionFactoryBase {
 
   virtual void SetServerDelegate(ServerDelegate* delegate,
                                  const std::vector<IPEndpoint>& endpoints);
+  virtual void Shutdown();
   ServerDelegate* server_delegate() { return server_delegate_; }
 
  private:
   std::unique_ptr<quic::QuicCryptoServerConfig> crypto_server_config_;
-  ServerDelegate* server_delegate_ = nullptr;
+  raw_ptr<ServerDelegate> server_delegate_ = nullptr;
 
   // New entry is added when an UdpSocket is created and the corresponding
   // QuicDispatcherImpl is responsible for processing UDP packets.

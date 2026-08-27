@@ -13,6 +13,8 @@
 #include "platform/api/time.h"
 #include "platform/impl/socket_handle_waiter.h"
 #include "util/osp_logging.h"
+#include "util/raw_ptr.h"
+#include "util/thread_annotations.h"
 
 namespace openscreen {
 
@@ -35,7 +37,7 @@ class TlsDataRouterPosix : public SocketHandleWaiter::Subscriber {
  public:
   class SocketObserver {
    public:
-    virtual ~SocketObserver() = default;
+    virtual ~SocketObserver();
 
     // Socket creation shouldn't occur on the Networking thread, so pass the
     // socket to the observer and expect them to call socket->Accept() on the
@@ -48,6 +50,10 @@ class TlsDataRouterPosix : public SocketHandleWaiter::Subscriber {
   TlsDataRouterPosix(
       SocketHandleWaiter* waiter,
       std::function<Clock::time_point()> now_function = Clock::now);
+  TlsDataRouterPosix(const TlsDataRouterPosix&) = delete;
+  TlsDataRouterPosix(TlsDataRouterPosix&&) noexcept = delete;
+  TlsDataRouterPosix& operator=(const TlsDataRouterPosix&) = delete;
+  TlsDataRouterPosix& operator=(TlsDataRouterPosix&&) = delete;
   ~TlsDataRouterPosix() override;
 
   // Register a TlsConnection that should be watched for readable and writable
@@ -69,9 +75,7 @@ class TlsDataRouterPosix : public SocketHandleWaiter::Subscriber {
   // SocketHandleWaiter::Subscriber overrides.
   void ProcessReadyHandle(SocketHandleWaiter::SocketHandleRef handle,
                           uint32_t flags) override;
-
-  OSP_DISALLOW_COPY_AND_ASSIGN(TlsDataRouterPosix);
-
+  bool HasPendingWrite(SocketHandleWaiter::SocketHandleRef handle) override;
  protected:
   // Determines if the provided socket is currently being watched by this
   // instance.
@@ -85,7 +89,7 @@ class TlsDataRouterPosix : public SocketHandleWaiter::Subscriber {
   bool disable_locking_for_testing_ = false;
 
  private:
-  SocketHandleWaiter* waiter_;
+  raw_ptr<SocketHandleWaiter> waiter_;
 
   // Mutex guarding connections_ vector.
   mutable std::mutex connections_mutex_;
@@ -98,16 +102,15 @@ class TlsDataRouterPosix : public SocketHandleWaiter::Subscriber {
 
   // Mapping from all sockets to the observer that should be called when the
   // socket recognizes an incoming connection.
-  std::unordered_map<StreamSocketPosix*, SocketObserver*>
-      accept_socket_mappings_;  // ABSL_GUARDED_BY(accept_socket_mutex_)
+  std::unordered_map<raw_ptr<StreamSocketPosix>, raw_ptr<SocketObserver>>
+      accept_socket_mappings_ OSP_GUARDED_BY(accept_socket_mutex_);
 
   // Set of all TlsConnectionPosix objects currently registered.
-  std::vector<TlsConnectionPosix*>
-      connections_;  // ABSL_GUARDED_BY(connections_mutex_)
+  std::vector<raw_ptr<TlsConnectionPosix>> connections_
+      OSP_GUARDED_BY(connections_mutex_);
 
   // StreamSockets currently owned by this object, being watched for
-  std::vector<std::unique_ptr<StreamSocketPosix>>
-      accept_stream_sockets_;  // ABSL_GUARDED_BY(accept_socket_mutex_)
+  std::vector<std::unique_ptr<StreamSocketPosix>> accept_stream_sockets_;
 };
 
 }  // namespace openscreen

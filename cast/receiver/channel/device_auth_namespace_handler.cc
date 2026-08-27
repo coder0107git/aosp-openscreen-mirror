@@ -66,7 +66,7 @@ void DeviceAuthNamespaceHandler::OnMessage(VirtualConnectionRouter* router,
   }
   const std::string& payload = message.payload_binary();
   DeviceAuthMessage device_auth_message;
-  if (!device_auth_message.ParseFromArray(payload.data(), payload.length())) {
+  if (!device_auth_message.ParseFromString(payload)) {
     // TODO(btolsch): Consider all of these cases for future error reporting
     // mechanism.
     return;
@@ -95,9 +95,9 @@ void DeviceAuthNamespaceHandler::OnMessage(VirtualConnectionRouter* router,
   }
   const EVP_MD* digest = hash_alg == proto::SHA256 ? EVP_sha256() : EVP_sha1();
 
-  const ByteView tls_cert_der = creds_provider_.GetCurrentTlsCertAsDer();
+  const ByteView tls_cert_der = creds_provider_->GetCurrentTlsCertAsDer();
   const DeviceCredentials& device_creds =
-      creds_provider_.GetCurrentDeviceCredentials();
+      creds_provider_->GetCurrentDeviceCredentials();
   if (tls_cert_der.empty() || device_creds.certs.empty() ||
       !device_creds.private_key) {
     // TODO(btolsch): Add this to future error reporting.

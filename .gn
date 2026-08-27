@@ -16,3 +16,18 @@ check_targets = [
   "//tools/*",
   "//util/*",
 ]
+
+default_args = {
+  # Disable js dependencies like the closure compiler.
+  enable_js_protobuf = false
+
+  # Enable rust dependencies.
+  enable_rust = true
+
+  # Needed only for std::atomic_ref<T> for large Ts http://crbug.com/402171653
+  use_llvm_libatomic = false
+
+  # Openscreen generally has the same consumers as WebRTC. So while WebRTC
+  # stays in C++20, so should openscreen.
+  use_cxx23 = false
+}

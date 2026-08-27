@@ -13,6 +13,8 @@
 #include "platform/base/error.h"
 #include "platform/base/trivial_clock_traits.h"
 #include "util/alarm.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::discovery {
 
@@ -73,15 +75,15 @@ class MdnsTracker {
   bool AddAdjacentNode(const MdnsTracker* tracker) const;
   bool RemoveAdjacentNode(const MdnsTracker* tracker) const;
 
-  const std::vector<const MdnsTracker*>& adjacent_nodes() const {
+  const std::vector<raw_ptr<const MdnsTracker>>& adjacent_nodes() const {
     return adjacent_nodes_;
   }
 
-  MdnsSender& sender_;
-  TaskRunner& task_runner_;
+  const raw_ref<MdnsSender> sender_;
+  const raw_ref<TaskRunner> task_runner_;
   const ClockNowFunctionPtr now_function_;
   Alarm send_alarm_;
-  MdnsRandom& random_delay_;
+  const raw_ref<MdnsRandom> random_delay_;
   TrackerType tracker_type_;
 
  private:
@@ -90,7 +92,7 @@ class MdnsTracker {
   void RemovedReverseAdjacency(const MdnsTracker* tracker) const;
 
   // Adjacency list for this graph node.
-  mutable std::vector<const MdnsTracker*> adjacent_nodes_;
+  mutable std::vector<raw_ptr<const MdnsTracker>> adjacent_nodes_;
 };
 
 class MdnsQuestionTracker;

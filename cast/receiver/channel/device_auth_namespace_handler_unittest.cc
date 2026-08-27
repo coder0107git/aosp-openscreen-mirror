@@ -18,6 +18,9 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "platform/test/paths.h"
+#include "util/no_destructor.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 #include "util/read_file.h"
 
 namespace openscreen::cast {
@@ -30,11 +33,11 @@ using proto::SignatureAlgorithm;
 
 using ::testing::_;
 using ::testing::ElementsAreArray;
-using ::testing::Invoke;
 
 const std::string& GetSpecificTestDataPath() {
-  static std::string data_path = GetTestDataPath() + "cast/receiver/channel/";
-  return data_path;
+  static const NoDestructor<std::string> data_path(GetTestDataPath() +
+                                                   "cast/receiver/channel/");
+  return *data_path;
 }
 
 class DeviceAuthNamespaceHandlerTest : public ::testing::Test {
@@ -47,14 +50,14 @@ class DeviceAuthNamespaceHandlerTest : public ::testing::Test {
   }
 
  protected:
-  const std::string& data_path_{GetSpecificTestDataPath()};
-  FakeCastSocketPair fake_cast_socket_pair_;
+  const raw_ref<const std::string> data_path_{GetSpecificTestDataPath()};
   MockSocketErrorHandler mock_error_handler_;
-  CastSocket* socket_;
-
   StaticCredentialsProvider creds_;
   VirtualConnectionRouter router_;
   DeviceAuthNamespaceHandler auth_handler_{creds_};
+
+  FakeCastSocketPair fake_cast_socket_pair_;
+  raw_ptr<CastSocket> socket_;
 };
 
 // The tests in this file use a pre-recorded AuthChallenge as input and a
@@ -75,27 +78,26 @@ class DeviceAuthNamespaceHandlerTest : public ::testing::Test {
 
 TEST_F(DeviceAuthNamespaceHandlerTest, AuthResponse) {
   InitStaticCredentialsFromFiles(
-      &creds_, nullptr, nullptr, data_path_ + "device_key.pem",
-      data_path_ + "device_chain.pem", data_path_ + "device_tls.pem");
+      &creds_, nullptr, nullptr, (*data_path_) + "device_key.pem",
+      (*data_path_) + "device_chain.pem", (*data_path_) + "device_tls.pem");
 
   // Send an auth challenge.  `auth_handler_` will automatically respond via
   // `router_` and we will catch the result in `challenge_reply`.
   CastMessage auth_challenge;
   const std::string auth_challenge_string =
-      ReadEntireFileToString(data_path_ + "auth_challenge.pb");
+      ReadEntireFileToString((*data_path_) + "auth_challenge.pb");
   ASSERT_TRUE(auth_challenge.ParseFromString(auth_challenge_string));
 
   CastMessage challenge_reply;
   EXPECT_CALL(fake_cast_socket_pair_.mock_peer_client, OnMessage(_, _))
-      .WillOnce(
-          Invoke([&challenge_reply](CastSocket* socket, CastMessage message) {
-            challenge_reply = std::move(message);
-          }));
+      .WillOnce([&challenge_reply](CastSocket* socket, CastMessage message) {
+        challenge_reply = std::move(message);
+      });
   ASSERT_TRUE(
       fake_cast_socket_pair_.peer_socket->Send(std::move(auth_challenge)).ok());
 
   const std::string auth_response_string =
-      ReadEntireFileToString(data_path_ + "auth_response.pb");
+      ReadEntireFileToString((*data_path_) + "auth_response.pb");
   AuthResponse expected_auth_response;
   ASSERT_TRUE(expected_auth_response.ParseFromString(auth_response_string));
 
@@ -125,14 +127,14 @@ TEST_F(DeviceAuthNamespaceHandlerTest, AuthResponse) {
 
 TEST_F(DeviceAuthNamespaceHandlerTest, BadNonce) {
   InitStaticCredentialsFromFiles(
-      &creds_, nullptr, nullptr, data_path_ + "device_key.pem",
-      data_path_ + "device_chain.pem", data_path_ + "device_tls.pem");
+      &creds_, nullptr, nullptr, (*data_path_) + "device_key.pem",
+      (*data_path_) + "device_chain.pem", (*data_path_) + "device_tls.pem");
 
   // Send an auth challenge.  `auth_handler_` will automatically respond via
   // `router_` and we will catch the result in `challenge_reply`.
   CastMessage auth_challenge;
   const std::string auth_challenge_string =
-      ReadEntireFileToString(data_path_ + "auth_challenge.pb");
+      ReadEntireFileToString((*data_path_) + "auth_challenge.pb");
   ASSERT_TRUE(auth_challenge.ParseFromString(auth_challenge_string));
 
   // Change the nonce to be different from what was used to record the correct
@@ -150,15 +152,14 @@ TEST_F(DeviceAuthNamespaceHandlerTest, BadNonce) {
 
   CastMessage challenge_reply;
   EXPECT_CALL(fake_cast_socket_pair_.mock_peer_client, OnMessage(_, _))
-      .WillOnce(
-          Invoke([&challenge_reply](CastSocket* socket, CastMessage message) {
-            challenge_reply = std::move(message);
-          }));
+      .WillOnce([&challenge_reply](CastSocket* socket, CastMessage message) {
+        challenge_reply = std::move(message);
+      });
   ASSERT_TRUE(
       fake_cast_socket_pair_.peer_socket->Send(std::move(auth_challenge)).ok());
 
   const std::string auth_response_string =
-      ReadEntireFileToString(data_path_ + "auth_response.pb");
+      ReadEntireFileToString((*data_path_) + "auth_response.pb");
   AuthResponse expected_auth_response;
   ASSERT_TRUE(expected_auth_response.ParseFromString(auth_response_string));
 
@@ -177,14 +178,14 @@ TEST_F(DeviceAuthNamespaceHandlerTest, BadNonce) {
 
 TEST_F(DeviceAuthNamespaceHandlerTest, UnsupportedSignatureAlgorithm) {
   InitStaticCredentialsFromFiles(
-      &creds_, nullptr, nullptr, data_path_ + "device_key.pem",
-      data_path_ + "device_chain.pem", data_path_ + "device_tls.pem");
+      &creds_, nullptr, nullptr, (*data_path_) + "device_key.pem",
+      (*data_path_) + "device_chain.pem", (*data_path_) + "device_tls.pem");
 
   // Send an auth challenge.  `auth_handler_` will automatically respond via
   // `router_` and we will catch the result in `challenge_reply`.
   CastMessage auth_challenge;
   const std::string auth_challenge_string =
-      ReadEntireFileToString(data_path_ + "auth_challenge.pb");
+      ReadEntireFileToString((*data_path_) + "auth_challenge.pb");
   ASSERT_TRUE(auth_challenge.ParseFromString(auth_challenge_string));
 
   // Change the signature algorithm an unsupported value.
@@ -201,10 +202,9 @@ TEST_F(DeviceAuthNamespaceHandlerTest, UnsupportedSignatureAlgorithm) {
 
   CastMessage challenge_reply;
   EXPECT_CALL(fake_cast_socket_pair_.mock_peer_client, OnMessage(_, _))
-      .WillOnce(
-          Invoke([&challenge_reply](CastSocket* socket, CastMessage message) {
-            challenge_reply = std::move(message);
-          }));
+      .WillOnce([&challenge_reply](CastSocket* socket, CastMessage message) {
+        challenge_reply = std::move(message);
+      });
   ASSERT_TRUE(
       fake_cast_socket_pair_.peer_socket->Send(std::move(auth_challenge)).ok());
 

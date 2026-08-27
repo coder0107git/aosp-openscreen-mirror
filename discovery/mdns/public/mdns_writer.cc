@@ -7,9 +7,9 @@
 #include <limits>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
-#include "absl/types/variant.h"
 #include "util/hashing.h"
 #include "util/osp_logging.h"
 #include "util/string_util.h"
@@ -20,11 +20,10 @@ namespace {
 
 std::vector<uint64_t> ComputeDomainNameSubhashes(const DomainName& name) {
   const std::vector<std::string>& labels = name.labels();
-  uint64_t hash_value = openscreen::kDefaultSeed;
+  uint64_t hash_value = kDefaultSeed;
   std::vector<uint64_t> subhashes(labels.size());
   for (size_t i = labels.size(); i-- > 0;) {
-    hash_value = ComputeAggregateHash(hash_value,
-                                      string_util::AsciiStrToLower(labels[i]));
+    hash_value = ComputeAggregateHash(hash_value, AsciiStrToLower(labels[i]));
     subhashes[i] = hash_value;
   }
   return subhashes;
@@ -253,20 +252,12 @@ bool MdnsWriter::Write(const MdnsMessage& message) {
 }
 
 bool MdnsWriter::Write(const IPAddress& address) {
-  uint8_t bytes[IPAddress::kV6Size];
-  size_t size;
-  if (address.IsV6()) {
-    address.CopyToV6(bytes);
-    size = IPAddress::kV6Size;
-  } else {
-    address.CopyToV4(bytes);
-    size = IPAddress::kV4Size;
-  }
-  return Write(bytes, size);
+  const auto bytes = address.bytes();
+  return BigEndianWriter::Write(bytes.data(), bytes.size());
 }
 
 bool MdnsWriter::Write(const Rdata& rdata) {
-  return absl::visit([this](const auto& r) { return this->Write(r); }, rdata);
+  return std::visit([this](const auto& r) { return this->Write(r); }, rdata);
 }
 
 bool MdnsWriter::Write(const Header& header) {

@@ -65,6 +65,7 @@ openscreen_source_set("api") {
     "api/trace_event.h",
     "api/trace_logging_platform.h",
     "api/udp_socket.h",
+    "api/web_transport.h",
   ]
   sources = [
     "api/task_runner_deleter.cc",
@@ -81,6 +82,16 @@ openscreen_source_set("api") {
   ]
 }
 
+declare_args() {
+  use_perfetto = !build_with_chromium
+}
+
+config("standalone_config") {
+  if (use_perfetto) {
+    defines = [ "USE_PERFETTO" ]
+  }
+}
+
 # The following target is only activated in standalone builds (see :platform).
 # Disable standalone implementation for IOS. It is not supported.
 if (!is_ios) {
@@ -94,7 +105,8 @@ if (!is_ios) {
     visibility += [
       "../cast/common:discovery_e2e_test",
       "../cast/standalone_receiver:cast_receiver",
-      "../cast/standalone_sender:cast_sender",
+      "../cast/standalone_sender:*",
+      "../cast/standalone_sender/bindings/python:*",
       "../cast/test:e2e_tests",
       "../osp:osp_demo",
       "../test:test_main",
@@ -119,7 +131,10 @@ if (!is_ios) {
       "impl/tls_write_buffer.h",
     ]
 
-    public_configs = [ "../util:trace_logging_config" ]
+    public_configs = [
+      "../util:trace_logging_config",
+      ":standalone_config",
+    ]
 
     if (is_linux || is_chromeos || is_android) {
       sources += [ "impl/network_interface_linux.cc" ]
@@ -163,10 +178,16 @@ if (!is_ios) {
 
     deps = [
       ":api",
-      "../third_party/abseil",
       "../third_party/boringssl",
       "../util",
     ]
+
+    if (use_perfetto) {
+      public += [ "impl/perfetto_trace_logging_platform.h" ]
+      sources += [ "impl/perfetto_trace_logging_platform.cc" ]
+      deps += [ "../third_party/perfetto" ]
+    }
+
     friend = [ ":unittests" ]
   }
 }
@@ -186,7 +207,6 @@ openscreen_source_set("test") {
   testonly = true
   visibility += [ "../*" ]
   public = [
-    "test/byte_view_test_util.h",
     "test/fake_clock.h",
     "test/fake_task_runner.h",
     "test/fake_udp_socket.h",
@@ -196,7 +216,6 @@ openscreen_source_set("test") {
     "test/trace_logging_helpers.h",
   ]
   sources = [
-    "test/byte_view_test_util.cc",
     "test/fake_clock.cc",
     "test/fake_task_runner.cc",
     "test/fake_udp_socket.cc",
@@ -223,7 +242,6 @@ openscreen_source_set("test") {
 
   deps = [
     ":platform",
-    "../third_party/abseil",
     "../third_party/googletest:gmock",
     "../util",
   ]
@@ -238,14 +256,12 @@ openscreen_source_set("unittests") {
     "base/error_unittest.cc",
     "base/ip_address_unittest.cc",
     "base/location_unittest.cc",
-    "base/span_unittest.cc",
     "base/udp_packet_unittest.cc",
   ]
 
   deps = [
     ":platform",
     ":test",
-    "../third_party/abseil",
     "../third_party/boringssl",
     "../third_party/googletest:gmock",
     "../third_party/googletest:gtest",
@@ -268,14 +284,21 @@ openscreen_source_set("unittests") {
     if (is_posix) {
       sources += [
         "impl/logging_unittest.cc",
+        "impl/platform_client_posix_unittest.cc",
         "impl/scoped_pipe_unittest.cc",
         "impl/socket_address_posix_unittest.cc",
         "impl/socket_handle_waiter_posix_unittest.cc",
         "impl/timeval_posix_unittest.cc",
+        "impl/tls_connection_factory_posix_unittest.cc",
         "impl/tls_data_router_posix_unittest.cc",
         "impl/tls_write_buffer_unittest.cc",
+        "impl/udp_socket_posix_unittest.cc",
         "impl/udp_socket_reader_posix_unittest.cc",
       ]
+    }
+
+    if (use_perfetto) {
+      sources += [ "impl/perfetto_trace_logging_platform_unittest.cc" ]
     }
   }
 }

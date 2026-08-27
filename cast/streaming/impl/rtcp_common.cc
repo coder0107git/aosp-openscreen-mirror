@@ -35,15 +35,13 @@ void RtcpCommonHeader::AppendFields(ByteBuffer& buffer) const {
       switch (with.subtype) {
         case RtcpSubtype::kPictureLossIndicator:
         case RtcpSubtype::kFeedback:
+        case RtcpSubtype::kReceiverLog:
           byte0 |= static_cast<uint8_t>(with.subtype);
           break;
 
-        // TODO(issuetracker.google.com/298085631): implement support for
-        // sending receiver logs over RTCP.
-        case RtcpSubtype::kReceiverLog:
-          OSP_UNIMPLEMENTED();
-          break;
-        default:
+        // We should not be creating application or payload specific packets
+        // with an unknown or null subtype -- they will just be ignored.
+        case RtcpSubtype::kNull:
           OSP_NOTREACHED();
       }
       break;
@@ -215,7 +213,7 @@ std::optional<RtcpReportBlock> RtcpReportBlock::ParseOne(ByteView buffer,
   for (int block = 0; block < report_count; ++block) {
     if (ConsumeField<uint32_t>(buffer) != ssrc) {
       // Skip-over report block meant for some other recipient.
-      buffer.remove_prefix(kRtcpReportBlockSize - sizeof(uint32_t));
+      buffer = buffer.subspan(kRtcpReportBlockSize - sizeof(uint32_t));
       continue;
     }
 

@@ -1,10 +1,12 @@
 Name: BoringSSL
 URL: https://boringssl.googlesource.com/boringssl
-Version: git
-License: BSDish
+Revision: 26e8a8acb91a0cfbd2f95bf7245e2eb87d533a2f
+Version: N/A
+License: SSLeay, ISC, MIT, BSD-3-Clause, OpenSSL
 License File: src/LICENSE
 License Android Compatible: yes
 Security Critical: yes
+Update Mechanism: Manual
 Shipped: yes
 
 Description:

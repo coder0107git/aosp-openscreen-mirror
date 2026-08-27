@@ -15,7 +15,7 @@
 #include "platform/base/tls_listen_options.h"
 #include "util/crypto/random_bytes.h"
 #include "util/osp_logging.h"
-#include "util/stringprintf.h"
+#include "util/string_util.h"
 
 namespace openscreen::cast {
 
@@ -44,17 +44,19 @@ discovery::Config MakeDiscoveryConfig(const InterfaceInfo& interface) {
 CastService::CastService(CastService::Configuration config)
     : local_endpoint_(DetermineEndpoint(config.interface)),
       credentials_(std::move(config.credentials)),
-      agent_(config.task_runner, *credentials_.provider),
-      mirroring_application_(config.task_runner,
+      agent_(*config.task_runner, *credentials_.provider, config.device_uuid),
+      mirroring_application_(*config.task_runner,
                              local_endpoint_.address,
-                             agent_),
+                             agent_,
+                             config.enable_dscp,
+                             config.enable_input_events),
       socket_factory_(agent_, *agent_.cast_socket_client()),
       connection_factory_(
           TlsConnectionFactory::CreateFactory(socket_factory_,
-                                              config.task_runner)),
+                                              *config.task_runner)),
       discovery_service_(config.enable_discovery
                              ? discovery::CreateDnsSdService(
-                                   config.task_runner,
+                                   *config.task_runner,
                                    *this,
                                    MakeDiscoveryConfig(config.interface))
                              : discovery::DnsSdServicePtr()),
@@ -65,7 +67,7 @@ CastService::CastService(CastService::Configuration config)
                         discovery_service_.get(),
                         kCastV2ServiceId,
                         ReceiverInfoToDnsSdInstance),
-                    TaskRunnerDeleter(config.task_runner))
+                    TaskRunnerDeleter(*config.task_runner))
               : LazyDeletedDiscoveryPublisher()) {
   connection_factory_->SetListenCredentials(credentials_.tls_credentials);
   connection_factory_->Listen(local_endpoint_, kDefaultListenOptions);
@@ -80,8 +82,8 @@ CastService::CastService(CastService::Configuration config)
       OSP_LOG_WARN << "Hardware address for interface " << config.interface.name
                    << " is empty. Generating a random unique_id.";
       std::array<uint8_t, kCastUniqueIdLength> random_bytes;
-      GenerateRandomBytes(random_bytes.data(), kCastUniqueIdLength);
-      info.unique_id = HexEncode(random_bytes.data(), kCastUniqueIdLength);
+      GenerateRandomBytes(random_bytes);
+      info.unique_id = HexEncode(random_bytes);
     }
     info.friendly_name = config.friendly_name;
     info.model_name = config.model_name;
@@ -97,6 +99,19 @@ CastService::~CastService() {
   if (discovery_publisher_) {
     discovery_publisher_->DeregisterAll();
   }
+}
+
+void CastService::AddApplicationNamespace(
+    std::string_view namespace_,
+    MirroringApplication::CustomMessageCallback handler) {
+  mirroring_application_.AddCustomNamespace(namespace_);
+  mirroring_application_.SetCustomMessageHandler(namespace_,
+                                                 std::move(handler));
+}
+
+void CastService::RemoveApplicationNamespace(std::string_view namespace_) {
+  mirroring_application_.RemoveCustomNamespace(namespace_);
+  mirroring_application_.SetCustomMessageHandler(namespace_, nullptr);
 }
 
 void CastService::OnFatalError(const Error& error) {

@@ -8,12 +8,18 @@
 #include <openssl/ssl.h>
 
 #include <memory>
+#include <utility>
 
+#include "platform/api/time.h"
 #include "platform/api/tls_connection.h"
 #include "platform/api/tls_connection_factory.h"
 #include "platform/base/error.h"
+#include "platform/base/trivial_clock_traits.h"
 #include "platform/impl/platform_client_posix.h"
 #include "platform/impl/tls_data_router_posix.h"
+#include "util/flat_map.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 #include "util/weak_ptr.h"
 
 namespace openscreen {
@@ -22,11 +28,19 @@ class StreamSocket;
 
 class TlsConnectionFactoryPosix : public TlsConnectionFactory,
                                   public TlsDataRouterPosix::SocketObserver {
+  friend class TlsConnectionFactoryPosixTest;
+
  public:
-  TlsConnectionFactoryPosix(Client& client,
-                            TaskRunner& task_runner,
-                            PlatformClientPosix* platform_client =
-                                PlatformClientPosix::GetInstance());
+  TlsConnectionFactoryPosix(
+      Client& client,
+      TaskRunner& task_runner,
+      PlatformClientPosix* platform_client = PlatformClientPosix::GetInstance(),
+      ClockNowFunctionPtr now_function = &Clock::now);
+  TlsConnectionFactoryPosix(const TlsConnectionFactoryPosix&) = delete;
+  TlsConnectionFactoryPosix(TlsConnectionFactoryPosix&&) noexcept = delete;
+  TlsConnectionFactoryPosix& operator=(const TlsConnectionFactoryPosix&) =
+      delete;
+  TlsConnectionFactoryPosix& operator=(TlsConnectionFactoryPosix&&) = delete;
   ~TlsConnectionFactoryPosix() override;
 
   // TlsConnectionFactory overrides.
@@ -40,6 +54,19 @@ class TlsConnectionFactoryPosix : public TlsConnectionFactory,
               const TlsListenOptions& options) override;
 
  private:
+  struct SessionCacheEntry {
+    bssl::UniquePtr<SSL_SESSION> session;
+    Clock::time_point absolute_expiry;
+
+    SessionCacheEntry() = default;
+    SessionCacheEntry(bssl::UniquePtr<SSL_SESSION> s, Clock::time_point expiry)
+        : session(std::move(s)), absolute_expiry(expiry) {}
+    SessionCacheEntry(SessionCacheEntry&&) noexcept = default;
+    SessionCacheEntry& operator=(SessionCacheEntry&&) noexcept = default;
+    SessionCacheEntry(const SessionCacheEntry&) = delete;
+    SessionCacheEntry& operator=(const SessionCacheEntry&) = delete;
+  };
+
   // TlsDataRouterPosix::SocketObserver overrides.
   void OnConnectionPending(StreamSocketPosix* socket) override;
 
@@ -71,6 +98,11 @@ class TlsConnectionFactoryPosix : public TlsConnectionFactory,
   void DispatchConnectionFailed(const IPEndpoint& remote_endpoint);
   void DispatchError(Error error);
 
+  bool LookupAndSetupSession(const IPEndpoint& remote_address, SSL* ssl);
+  void SaveSession(const IPEndpoint& remote,
+                   bssl::UniquePtr<SSL_SESSION> session);
+  void CleanupExpired();
+
   // Thread-safe mechanism to ensure Initialize() is only called once.
   std::once_flag init_instance_flag_;
 
@@ -78,16 +110,24 @@ class TlsConnectionFactoryPosix : public TlsConnectionFactory,
   // from the SSL_CTX is non-trivial, so we store a property instead.
   bool listen_credentials_set_ = false;
 
-  Client& client_;
-  TaskRunner& task_runner_;
-  PlatformClientPosix* const platform_client_;
+  const raw_ref<Client> client_;
+  const raw_ref<TaskRunner> task_runner_;
+  const raw_ptr<PlatformClientPosix> platform_client_;
 
   // SSL context, for creating SSL Connections via BoringSSL.
   bssl::UniquePtr<SSL_CTX> ssl_context_;
 
-  WeakPtrFactory<TlsConnectionFactoryPosix> weak_factory_{this};
+  // Client-side session cache for session resumption. We use a FlatMap as an
+  // LRU queue by pushing recently used items to the back and evicting from the
+  // front.
+  FlatMap<IPEndpoint, SessionCacheEntry> sessions_;
 
-  OSP_DISALLOW_COPY_AND_ASSIGN(TlsConnectionFactoryPosix);
+  // Maximum number of sessions to cache.
+  static constexpr size_t kSslSessionCacheSize = 10;
+
+  ClockNowFunctionPtr now_function_;
+
+  WeakPtrFactory<TlsConnectionFactoryPosix> weak_factory_{this};
 };
 
 }  // namespace openscreen

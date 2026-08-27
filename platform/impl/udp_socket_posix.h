@@ -6,9 +6,10 @@
 #define PLATFORM_IMPL_UDP_SOCKET_POSIX_H_
 
 #include "platform/api/udp_socket.h"
-#include "platform/base/macros.h"
 #include "platform/impl/platform_client_posix.h"
 #include "platform/impl/socket_handle_posix.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 #include "util/weak_ptr.h"
 
 namespace openscreen {
@@ -28,7 +29,10 @@ class UdpSocketPosix : public UdpSocket {
                  const IPEndpoint& local_endpoint,
                  PlatformClientPosix* platform_client =
                      PlatformClientPosix::GetInstance());
-
+  UdpSocketPosix(const UdpSocketPosix&) = delete;
+  UdpSocketPosix(UdpSocketPosix&&) noexcept = delete;
+  UdpSocketPosix& operator=(const UdpSocketPosix&) = delete;
+  UdpSocketPosix& operator=(UdpSocketPosix&&) = delete;
   ~UdpSocketPosix() override;
 
   // Implementations of UdpSocket methods.
@@ -40,7 +44,9 @@ class UdpSocketPosix : public UdpSocket {
   void JoinMulticastGroup(const IPAddress& address,
                           NetworkInterfaceIndex ifindex) override;
   void SendMessage(ByteView data, const IPEndpoint& dest) override;
-  void SetDscp(DscpMode state) override;
+  void SetDscp(DscpMode mode) override;
+  void SetReceiveBufferSize(size_t size) override;
+  void SetSendBufferSize(size_t size) override;
 
   const SocketHandle& GetHandle() const;
 
@@ -61,11 +67,11 @@ class UdpSocketPosix : public UdpSocket {
   void Close();
 
   // Task runner to use for queuing `client_` callbacks.
-  TaskRunner& task_runner_;
+  const raw_ref<TaskRunner> task_runner_;
 
   // Client to use for callbacks. This can be nullptr if the user does not want
   // any callbacks (for example, in the send-only case).
-  Client* const client_;
+  const raw_ptr<Client> client_;
 
   // Holds the POSIX file descriptor, or -1 if the socket is closed.
   SocketHandle handle_;
@@ -78,9 +84,7 @@ class UdpSocketPosix : public UdpSocket {
 
   WeakPtrFactory<UdpSocketPosix> weak_factory_{this};
 
-  PlatformClientPosix* const platform_client_;
-
-  OSP_DISALLOW_COPY_AND_ASSIGN(UdpSocketPosix);
+  const raw_ptr<PlatformClientPosix> platform_client_;
 };
 
 }  // namespace openscreen

@@ -5,14 +5,12 @@
 #include "cast/common/public/receiver_info.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cinttypes>
 #include <string>
 #include <vector>
 
 #include "discovery/mdns/public/mdns_constants.h"
 #include "util/osp_logging.h"
-#include "util/span_util.h"
 #include "util/string_parse.h"
 
 namespace openscreen::cast {
@@ -44,8 +42,7 @@ std::string CalculateInstanceId(const ReceiverInfo& info) {
   // '-' character if not empty. Strip all hyphens from the receiver ID prior
   // to appending it.
   std::string receiver_id(info.unique_id);
-  receiver_id.erase(std::remove(receiver_id.begin(), receiver_id.end(), '-'),
-                    receiver_id.end());
+  std::erase(receiver_id, '-');
 
   if (!instance_name.empty()) {
     instance_name.push_back('-');
@@ -145,7 +142,7 @@ ErrorOr<ReceiverInfo> DnsSdInstanceEndpointToReceiverInfo(
   constexpr int kMinVersion = 2;   // According to spec.
   constexpr int kMaxVersion = 99;  // Implied by spec (field is max of 2 bytes).
   int version;
-  if (!string_parse::ParseAsciiNumber(version_value.value(), version) ||
+  if (!ParseAsciiNumber(version_value.value(), version) ||
       version < kMinVersion || version > kMaxVersion) {
     return {Error::Code::kParameterInvalid,
             "Invalid Cast protocol version in record."};
@@ -158,8 +155,7 @@ ErrorOr<ReceiverInfo> DnsSdInstanceEndpointToReceiverInfo(
     return {Error::Code::kParameterInvalid,
             "Missing receiver capabilities in record."};
   }
-  if (!string_parse::ParseAsciiNumber(capabilities_value.value(),
-                                      record.capabilities)) {
+  if (!ParseAsciiNumber(capabilities_value.value(), record.capabilities)) {
     return {Error::Code::kParameterInvalid,
             "Invalid receiver capabilities field in record."};
   }

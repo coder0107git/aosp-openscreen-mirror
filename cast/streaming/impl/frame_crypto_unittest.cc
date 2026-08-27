@@ -8,13 +8,16 @@
 #include <cstring>
 #include <vector>
 
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "platform/base/span.h"
-#include "platform/test/byte_view_test_util.h"
 #include "util/crypto/random_bytes.h"
 
 namespace openscreen::cast {
 namespace {
+
+using testing::ElementsAreArray;
+using testing::Not;
 
 TEST(FrameCryptoTest, EncryptsAndDecryptsFrames) {
   // Prepare two frames with different FrameIds, but having the same payload
@@ -39,36 +42,35 @@ TEST(FrameCryptoTest, EncryptsAndDecryptsFrames) {
   // the plaintext, and that both frames have different encrypted data.
   const EncryptedFrame encrypted_frame0 = crypto.Encrypt(frame0);
   EXPECT_EQ(frame0.frame_id, encrypted_frame0.frame_id);
-  ASSERT_EQ(static_cast<int>(frame0.data.size()),
-            FrameCrypto::GetPlaintextSize(encrypted_frame0));
-  ExpectByteViewsHaveDifferentBytes(frame0.data, encrypted_frame0.data);
+  ASSERT_EQ(frame0.data.size(), encrypted_frame0.data.size());
+  EXPECT_THAT(frame0.data, Not(ElementsAreArray(encrypted_frame0.data)));
+
   const EncryptedFrame encrypted_frame1 = crypto.Encrypt(frame1);
   EXPECT_EQ(frame1.frame_id, encrypted_frame1.frame_id);
-  ASSERT_EQ(static_cast<int>(frame1.data.size()),
-            FrameCrypto::GetPlaintextSize(encrypted_frame1));
-  ExpectByteViewsHaveDifferentBytes(frame1.data, encrypted_frame1.data);
-  ExpectByteViewsHaveDifferentBytes(encrypted_frame0.data,
-                                    encrypted_frame1.data);
+  ASSERT_EQ(frame1.data.size(), encrypted_frame1.data.size());
+  EXPECT_THAT(frame1.data, Not(ElementsAreArray(encrypted_frame1.data)));
+  EXPECT_THAT(encrypted_frame0.data,
+              Not(ElementsAreArray(encrypted_frame1.data)));
 
   // Now, decrypt the encrypted frames, and confirm the original payload
   // plaintext is retrieved.
-  std::vector<uint8_t> decrypted_frame0_buffer(
-      FrameCrypto::GetPlaintextSize(encrypted_frame0));
-  crypto.Decrypt(encrypted_frame0, decrypted_frame0_buffer);
+  std::vector<uint8_t> decrypted_frame0_buffer(encrypted_frame0.data.size());
+  crypto.Decrypt(encrypted_frame0.frame_id, {&encrypted_frame0.data, 1},
+                 decrypted_frame0_buffer);
   EncodedFrame decrypted_frame0;
   encrypted_frame0.CopyMetadataTo(&decrypted_frame0);
   decrypted_frame0.data = decrypted_frame0_buffer;
   EXPECT_EQ(frame0.frame_id, decrypted_frame0.frame_id);
-  ExpectByteViewsHaveSameBytes(frame0.data, decrypted_frame0.data);
+  EXPECT_THAT(frame0.data, ElementsAreArray(decrypted_frame0.data));
 
-  std::vector<uint8_t> decrypted_frame1_buffer(
-      FrameCrypto::GetPlaintextSize(encrypted_frame1));
-  crypto.Decrypt(encrypted_frame1, decrypted_frame1_buffer);
+  std::vector<uint8_t> decrypted_frame1_buffer(encrypted_frame1.data.size());
+  crypto.Decrypt(encrypted_frame1.frame_id, {&encrypted_frame1.data, 1},
+                 decrypted_frame1_buffer);
   EncodedFrame decrypted_frame1;
   encrypted_frame1.CopyMetadataTo(&decrypted_frame1);
   decrypted_frame1.data = decrypted_frame1_buffer;
   EXPECT_EQ(frame1.frame_id, decrypted_frame1.frame_id);
-  ExpectByteViewsHaveSameBytes(frame1.data, decrypted_frame1.data);
+  EXPECT_THAT(frame1.data, ElementsAreArray(decrypted_frame1.data));
 }
 
 }  // namespace

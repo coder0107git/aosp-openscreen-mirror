@@ -47,7 +47,7 @@ bool QuicServer::Stop() {
   bool result = StopImpl();
   if (result) {
     static_cast<QuicConnectionFactoryServer*>(connection_factory_.get())
-        ->SetServerDelegate(nullptr, {});
+        ->Shutdown();
   }
   return result;
 }
@@ -69,8 +69,9 @@ std::string QuicServer::GetAgentFingerprint() {
   return GetAgentCertificate().GetAgentFingerprint();
 }
 
-void QuicServer::OnClientCertificates(std::string_view instance_name,
-                                      const std::vector<std::string>& certs) {
+void QuicServer::OnClientCertificates(
+    std::string_view instance_name,
+    const std::vector<std::string_view>& certs) {
   fingerprint_map_.emplace(instance_name,
                            base64::Encode(quic::RawSha256(certs[0])));
 }

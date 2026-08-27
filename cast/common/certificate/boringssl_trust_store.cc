@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include <chrono>
+#include <format>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -23,7 +24,7 @@
 #include "cast/common/certificate/date_time.h"
 #include "util/crypto/pem_helpers.h"
 #include "util/osp_logging.h"
-#include "util/stringprintf.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::cast {
 namespace {
@@ -74,7 +75,7 @@ constexpr static int32_t kMinRsaModulusLengthBits = 2048;
 // sequence of these forms a certificate chain to be verified as well as a stack
 // that can be unwound for searching more potential paths.
 struct CertPathStep {
-  X509* cert;
+  raw_ptr<X509> cert;
 
   // The next index that can be checked in `trust_store` if the choice `cert` on
   // the path needs to be reverted.
@@ -383,9 +384,9 @@ BoringSSLTrustStore::FindCertificatePath(
     intermediate_certs.emplace_back(ParseX509Der(der_certs[i]));
     if (!intermediate_certs.back()) {
       return Error(Error::Code::kErrCertsParse,
-                   StringPrintf("FindCertificatePath: Failed to parse "
-                                "intermediate certificate %zu of %zu",
-                                i, der_certs.size()));
+                   std::format("FindCertificatePath: Failed to parse "
+                               "intermediate certificate {} of {}",
+                               i, der_certs.size()));
     }
   }
 

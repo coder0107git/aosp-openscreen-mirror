@@ -6,6 +6,7 @@
 
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "discovery/dnssd/impl/constants.h"
@@ -14,7 +15,6 @@
 #include "discovery/dnssd/public/dns_sd_instance.h"
 #include "discovery/mdns/public/mdns_constants.h"
 #include "discovery/mdns/public/mdns_records.h"
-#include "util/span_util.h"
 #include "util/string_util.h"
 
 namespace openscreen::discovery {
@@ -23,11 +23,10 @@ namespace {
 void AddServiceInfoToLabels(const std::string& service,
                             const std::string& domain,
                             std::vector<std::string>* labels) {
-  std::vector<std::string_view> service_labels =
-      string_util::Split(service, '.');
+  std::vector<std::string_view> service_labels = Split(service, '.');
   labels->insert(labels->end(), service_labels.begin(), service_labels.end());
 
-  std::vector<std::string_view> domain_labels = string_util::Split(domain, '.');
+  std::vector<std::string_view> domain_labels = Split(domain, '.');
   labels->insert(labels->end(), domain_labels.begin(), domain_labels.end());
 }
 
@@ -146,7 +145,7 @@ DomainName GetDomainName(const InstanceKey& key) {
 
 DomainName GetDomainName(const MdnsRecord& record) {
   return IsPtrRecord(record)
-             ? absl::get<PtrRecordRdata>(record.rdata()).ptr_domain()
+             ? std::get<PtrRecordRdata>(record.rdata()).ptr_domain()
              : record.name();
 }
 

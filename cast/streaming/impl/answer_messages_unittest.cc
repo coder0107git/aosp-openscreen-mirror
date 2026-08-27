@@ -5,6 +5,7 @@
 #include "cast/streaming/public/answer_messages.h"
 
 #include <chrono>
+#include <format>
 #include <string_view>
 #include <utility>
 
@@ -12,6 +13,7 @@
 #include "gtest/gtest.h"
 #include "util/chrono_helpers.h"
 #include "util/json/json_serialization.h"
+#include "util/no_destructor.h"
 
 namespace openscreen::cast {
 
@@ -62,42 +64,47 @@ constexpr char kValidAnswerJson[] = R"({
     "scaling": "sender"
   },
   "receiverRtcpEventLog": [0, 1],
-  "receiverRtcpDscp": [234, 567],
-  "rtpExtensions": ["adaptive_playout_delay"]
+  "receiverRtcpDscp": [1, 3],
+  "rtpExtensions": [["input_events", "adaptive_playout_delay"],
+                    ["adaptive_playout_delay"]]
 })";
 
-const Answer kValidAnswer{
-    1234,                         // udp_port
-    std::vector<int>{1, 2, 3},    // send_indexes
-    std::vector<Ssrc>{123, 456},  // ssrcs
-    std::optional<Constraints>(Constraints{
-        AudioConstraints{
-            96000,              // max_sample_rate
-            7,                  // max_channels
-            32000,              // min_bit_rate
-            96000,              // max_bit_rate
-            milliseconds(2000)  // max_delay
-        },                      // audio
-        VideoConstraints{
-            40000.0,  // max_pixels_per_second
-            std::optional<Dimensions>(
-                Dimensions{320, 480, SimpleFraction{15000, 101}}),
-            Dimensions{1920, 1080, SimpleFraction{288, 2}},
-            300000,             // min_bit_rate
-            144000000,          // max_bit_rate
-            milliseconds(3000)  // max_delay
-        }                       // video
-    }),                         // constraints
-    std::optional<DisplayDescription>(DisplayDescription{
-        std::optional<Dimensions>(Dimensions{640, 480, SimpleFraction{30, 1}}),
-        std::optional<AspectRatio>(AspectRatio{16, 9}),  // aspect_ratio
-        std::optional<AspectRatioConstraint>(
-            AspectRatioConstraint::kFixed),  // scaling
-    }),
-    std::vector<int>{7, 8, 9},              // receiver_rtcp_event_log
-    std::vector<int>{11, 12, 13},           // receiver_rtcp_dscp
-    std::vector<std::string>{"foo", "bar"}  // rtp_extensions
-};
+const Answer& GetValidAnswer() {
+  static const NoDestructor<Answer> kValidAnswer(
+      1234,                         // udp_port
+      std::vector<int>{1, 3},       // send_indexes
+      std::vector<Ssrc>{123, 456},  // ssrcs
+      std::optional<Constraints>(Constraints{
+          AudioConstraints{
+              96000,              // max_sample_rate
+              7,                  // max_channels
+              32000,              // min_bit_rate
+              96000,              // max_bit_rate
+              milliseconds(2000)  // max_delay
+          },                      // audio
+          VideoConstraints{
+              40000.0,  // max_pixels_per_second
+              std::optional<Dimensions>(
+                  Dimensions{320, 480, SimpleFraction{15000, 101}}),
+              Dimensions{1920, 1080, SimpleFraction{288, 2}},
+              300000,             // min_bit_rate
+              144000000,          // max_bit_rate
+              milliseconds(3000)  // max_delay
+          }  // video
+      }),  // constraints
+      std::optional<DisplayDescription>(DisplayDescription{
+          std::optional<Dimensions>(
+              Dimensions{640, 480, SimpleFraction{30, 1}}),
+          std::optional<AspectRatio>(AspectRatio{16, 9}),  // aspect_ratio
+          std::optional<AspectRatioConstraint>(
+              AspectRatioConstraint::kFixed),  // scaling
+      }),
+      std::vector<int>{7, 8, 9},  // receiver_rtcp_event_log
+      std::vector<int>{1, 3},     // receiver_rtcp_dscp
+      std::vector<std::vector<std::string>>{{"foo"}, {"bar"}}  // rtp_extensions
+  );
+  return *kValidAnswer;
+}
 
 constexpr int kValidMaxPixelsPerSecond = 1920 * 1080 * 30;
 constexpr Dimensions kValidDimensions{1920, 1080, SimpleFraction{60, 1}};
@@ -146,8 +153,10 @@ void ExpectEqualsValidAnswerJson(const Answer& answer) {
             display.aspect_ratio_constraint.value());
 
   EXPECT_THAT(answer.receiver_rtcp_event_log, ElementsAre(0, 1));
-  EXPECT_THAT(answer.receiver_rtcp_dscp, ElementsAre(234, 567));
-  EXPECT_THAT(answer.rtp_extensions, ElementsAre("adaptive_playout_delay"));
+  EXPECT_THAT(answer.receiver_rtcp_dscp, ElementsAre(1, 3));
+  EXPECT_THAT(answer.rtp_extensions,
+              ElementsAre(ElementsAre("input_events", "adaptive_playout_delay"),
+                          ElementsAre("adaptive_playout_delay")));
 }
 
 void ExpectFailureOnParse(std::string_view raw_json) {
@@ -155,9 +164,8 @@ void ExpectFailureOnParse(std::string_view raw_json) {
   // Must be a valid JSON object, but not a valid answer.
   ASSERT_TRUE(root.is_value());
 
-  Answer answer;
-  EXPECT_FALSE(Answer::TryParse(std::move(root.value()), &answer));
-  EXPECT_FALSE(answer.IsValid());
+  const auto answer_or_error = Answer::TryParse(std::move(root.value()));
+  EXPECT_TRUE(answer_or_error.is_error());
 }
 
 // Functions that use ASSERT_* must return void, so we use an out parameter
@@ -167,26 +175,25 @@ void ExpectSuccessOnParse(std::string_view raw_json, Answer* out = nullptr) {
   // Must be a valid JSON object, but not a valid answer.
   ASSERT_TRUE(root.is_value());
 
-  Answer answer;
-  ASSERT_TRUE(Answer::TryParse(std::move(root.value()), &answer));
-  EXPECT_TRUE(answer.IsValid());
+  const auto answer_or_error = Answer::TryParse(std::move(root.value()));
+  ASSERT_TRUE(answer_or_error.is_value());
+  EXPECT_TRUE(answer_or_error.value().IsValid());
   if (out) {
-    *out = std::move(answer);
+    *out = std::move(answer_or_error.value());
   }
 }
 
 }  // anonymous namespace
 
 TEST(AnswerMessagesTest, ProperlyPopulatedAnswerSerializesProperly) {
-  ASSERT_TRUE(kValidAnswer.IsValid());
-  Json::Value root = kValidAnswer.ToJson();
+  ASSERT_TRUE(GetValidAnswer().IsValid());
+  Json::Value root = GetValidAnswer().ToJson();
   EXPECT_EQ(root["udpPort"], 1234);
 
   Json::Value sendIndexes = std::move(root["sendIndexes"]);
   EXPECT_EQ(sendIndexes.type(), Json::ValueType::arrayValue);
   EXPECT_EQ(sendIndexes[0], 1);
-  EXPECT_EQ(sendIndexes[1], 2);
-  EXPECT_EQ(sendIndexes[2], 3);
+  EXPECT_EQ(sendIndexes[1], 3);
 
   Json::Value ssrcs = std::move(root["ssrcs"]);
   EXPECT_EQ(ssrcs.type(), Json::ValueType::arrayValue);
@@ -240,30 +247,31 @@ TEST(AnswerMessagesTest, ProperlyPopulatedAnswerSerializesProperly) {
 
   Json::Value receiver_rtcp_dscp = std::move(root["receiverRtcpDscp"]);
   EXPECT_EQ(receiver_rtcp_dscp.type(), Json::ValueType::arrayValue);
-  EXPECT_EQ(receiver_rtcp_dscp[0], 11);
-  EXPECT_EQ(receiver_rtcp_dscp[1], 12);
-  EXPECT_EQ(receiver_rtcp_dscp[2], 13);
+  EXPECT_EQ(receiver_rtcp_dscp[0], 1);
+  EXPECT_EQ(receiver_rtcp_dscp[1], 3);
 
   Json::Value rtp_extensions = std::move(root["rtpExtensions"]);
   EXPECT_EQ(rtp_extensions.type(), Json::ValueType::arrayValue);
-  EXPECT_EQ(rtp_extensions[0], "foo");
-  EXPECT_EQ(rtp_extensions[1], "bar");
+  EXPECT_EQ(rtp_extensions[0].type(), Json::ValueType::arrayValue);
+  EXPECT_EQ(rtp_extensions[0][0], "foo");
+  EXPECT_EQ(rtp_extensions[1].type(), Json::ValueType::arrayValue);
+  EXPECT_EQ(rtp_extensions[1][0], "bar");
 }
 
 TEST(AnswerMessagesTest, EmptyArraysOmitted) {
-  Answer missing_event_log = kValidAnswer;
+  Answer missing_event_log = GetValidAnswer();
   missing_event_log.receiver_rtcp_event_log.clear();
   ASSERT_TRUE(missing_event_log.IsValid());
   Json::Value root = missing_event_log.ToJson();
   EXPECT_FALSE(root["receiverRtcpEventLog"]);
 
-  Answer missing_rtcp_dscp = kValidAnswer;
+  Answer missing_rtcp_dscp = GetValidAnswer();
   missing_rtcp_dscp.receiver_rtcp_dscp.clear();
   ASSERT_TRUE(missing_rtcp_dscp.IsValid());
   root = missing_rtcp_dscp.ToJson();
   EXPECT_FALSE(root["receiverRtcpDscp"]);
 
-  Answer missing_extensions = kValidAnswer;
+  Answer missing_extensions = GetValidAnswer();
   missing_extensions.rtp_extensions.clear();
   ASSERT_TRUE(missing_extensions.IsValid());
   root = missing_extensions.ToJson();
@@ -271,32 +279,32 @@ TEST(AnswerMessagesTest, EmptyArraysOmitted) {
 }
 
 TEST(AnswerMessagesTest, InvalidDimensionsCauseInvalid) {
-  Answer invalid_dimensions = kValidAnswer;
+  Answer invalid_dimensions = GetValidAnswer();
   invalid_dimensions.display->dimensions->width = -1;
   EXPECT_FALSE(invalid_dimensions.IsValid());
 }
 
 TEST(AnswerMessagesTest, InvalidAudioConstraintsCauseError) {
-  Answer invalid_audio = kValidAnswer;
+  Answer invalid_audio = GetValidAnswer();
   invalid_audio.constraints->audio.max_bit_rate =
       invalid_audio.constraints->audio.min_bit_rate - 1;
   EXPECT_FALSE(invalid_audio.IsValid());
 }
 
 TEST(AnswerMessagesTest, InvalidVideoConstraintsCauseError) {
-  Answer invalid_video = kValidAnswer;
+  Answer invalid_video = GetValidAnswer();
   invalid_video.constraints->video.max_pixels_per_second = -1.0;
   EXPECT_FALSE(invalid_video.IsValid());
 }
 
 TEST(AnswerMessagesTest, InvalidDisplayDescriptionsCauseError) {
-  Answer invalid_display = kValidAnswer;
+  Answer invalid_display = GetValidAnswer();
   invalid_display.display->aspect_ratio = {0, 0};
   EXPECT_FALSE(invalid_display.IsValid());
 }
 
 TEST(AnswerMessagesTest, InvalidUdpPortsCauseError) {
-  Answer invalid_port = kValidAnswer;
+  Answer invalid_port = GetValidAnswer();
   invalid_port.udp_port = 65536;
   EXPECT_FALSE(invalid_port.IsValid());
 }
@@ -320,6 +328,17 @@ TEST(AnswerMessagesTest, SucceedsWithMissingRtpFields) {
 
 TEST(AnswerMessagesTest, ErrorOnEmptyAnswer) {
   ExpectFailureOnParse("{}");
+}
+
+TEST(AnswerMessagesTest, ErrorOnNonObjectAnswer) {
+  Json::Value array_val(Json::arrayValue);
+  EXPECT_TRUE(Answer::TryParse(array_val).is_error());
+
+  Json::Value string_val("string");
+  EXPECT_TRUE(Answer::TryParse(string_val).is_error());
+
+  Json::Value int_val(42);
+  EXPECT_TRUE(Answer::TryParse(int_val).is_error());
 }
 
 TEST(AnswerMessagesTest, ErrorOnMissingUdpPort) {
@@ -509,22 +528,22 @@ TEST(AnswerMessagesTest, AspectRatioTryParse) {
   const Json::Value kZeroWidth = "0:9";
   const Json::Value kZeroHeight = "16:0";
 
-  AspectRatio out;
-  EXPECT_TRUE(AspectRatio::TryParse(kValid, &out));
-  EXPECT_EQ(out.width, 16);
-  EXPECT_EQ(out.height, 9);
-  EXPECT_FALSE(AspectRatio::TryParse(kWrongDelimiter, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kTooManyFields, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kTooFewFields, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kWrongDelimiter, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kNoDelimiter, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kNegativeWidth, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kNegativeHeight, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kNegativeBoth, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kNonNumberWidth, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kNonNumberHeight, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kZeroWidth, &out));
-  EXPECT_FALSE(AspectRatio::TryParse(kZeroHeight, &out));
+  const auto out = AspectRatio::TryParse(kValid);
+  ASSERT_TRUE(out.is_value());
+  EXPECT_EQ(out.value().width, 16);
+  EXPECT_EQ(out.value().height, 9);
+  EXPECT_TRUE(AspectRatio::TryParse(kWrongDelimiter).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kTooManyFields).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kTooFewFields).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kWrongDelimiter).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kNoDelimiter).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kNegativeWidth).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kNegativeHeight).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kNegativeBoth).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kNonNumberWidth).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kNonNumberHeight).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kZeroWidth).is_error());
+  EXPECT_TRUE(AspectRatio::TryParse(kZeroHeight).is_error());
 }
 
 TEST(AnswerMessagesTest, DisplayDescriptionTryParse) {
@@ -552,25 +571,29 @@ TEST(AnswerMessagesTest, DisplayDescriptionTryParse) {
   aspect_ratio_and_constraint["scaling"] = "sender";
   aspect_ratio_and_constraint["aspectRatio"] = "4:3";
 
-  DisplayDescription out;
-  ASSERT_TRUE(DisplayDescription::TryParse(valid_scaling, &out));
-  ASSERT_TRUE(out.aspect_ratio_constraint.has_value());
-  EXPECT_EQ(out.aspect_ratio_constraint.value(),
+  const auto out = DisplayDescription::TryParse(valid_scaling);
+  ASSERT_TRUE(out.is_value());
+  ASSERT_TRUE(out.value().aspect_ratio_constraint.has_value());
+  EXPECT_EQ(out.value().aspect_ratio_constraint.value(),
             AspectRatioConstraint::kVariable);
 
-  EXPECT_FALSE(DisplayDescription::TryParse(invalid_scaling, &out));
-  EXPECT_TRUE(DisplayDescription::TryParse(invalid_scaling_valid_ratio, &out));
+  EXPECT_TRUE(DisplayDescription::TryParse(invalid_scaling).is_error());
+  EXPECT_TRUE(
+      DisplayDescription::TryParse(invalid_scaling_valid_ratio).is_value());
 
-  ASSERT_TRUE(DisplayDescription::TryParse(valid_dimensions, &out));
-  ASSERT_TRUE(out.dimensions.has_value());
-  EXPECT_EQ(1920, out.dimensions->width);
-  EXPECT_EQ(1080, out.dimensions->height);
-  EXPECT_EQ((SimpleFraction{30, 1}), out.dimensions->frame_rate);
+  const auto out2 = DisplayDescription::TryParse(valid_dimensions);
+  ASSERT_TRUE(out2.is_value());
+  ASSERT_TRUE(out2.value().dimensions.has_value());
+  EXPECT_EQ(1920, out2.value().dimensions->width);
+  EXPECT_EQ(1080, out2.value().dimensions->height);
+  EXPECT_EQ((SimpleFraction{30, 1}), out2.value().dimensions->frame_rate);
 
-  EXPECT_FALSE(DisplayDescription::TryParse(invalid_dimensions, &out));
+  EXPECT_TRUE(DisplayDescription::TryParse(invalid_dimensions).is_error());
 
-  ASSERT_TRUE(DisplayDescription::TryParse(aspect_ratio_and_constraint, &out));
-  EXPECT_EQ(AspectRatioConstraint::kFixed, out.aspect_ratio_constraint.value());
+  const auto out3 = DisplayDescription::TryParse(aspect_ratio_and_constraint);
+  ASSERT_TRUE(out3.is_value());
+  EXPECT_EQ(AspectRatioConstraint::kFixed,
+            out3.value().aspect_ratio_constraint.value());
 }
 
 TEST(AnswerMessagesTest, DisplayDescriptionIsValid) {
@@ -613,6 +636,67 @@ TEST(AnswerMessagesTest, DisplayDescriptionIsValid) {
   EXPECT_FALSE(has_invalid_aspect_ratio.IsValid());
   EXPECT_FALSE(has_aspect_ratio_constraint.IsValid());
   EXPECT_TRUE(has_constraint_and_dimensions.IsValid());
+}
+
+std::string GenerateAnswerWithDataTransport(std::string_view protocol,
+                                            int port,
+                                            std::string_view fingerprint) {
+  static constexpr char kTemplate[] = R"({{
+    "castMode": "mirroring",
+    "udpPort": 1234,
+    "sendIndexes": [1, 3],
+    "ssrcs": [1233324, 2234222],
+    "dataTransport": {{
+      "protocol": "{}",
+      "port": {},
+      "certificateFingerprint": "{}"
+    }}
+  }})";
+  return std::format(kTemplate, protocol, port, fingerprint);
+}
+
+TEST(AnswerTest, CanParseValidAnswerWithDataTransport) {
+  ErrorOr<Json::Value> root = json::Parse(
+      GenerateAnswerWithDataTransport("webtransport", 4321, "abcde12345"));
+  ASSERT_TRUE(root.is_value()) << root.error();
+
+  const auto answer_or_error = Answer::TryParse(std::move(root.value()));
+  ASSERT_TRUE(answer_or_error.is_value());
+  EXPECT_TRUE(answer_or_error.value().data_transport.has_value());
+  EXPECT_EQ(answer_or_error.value().data_transport->protocol,
+            DataTransportProtocol::kWebTransport);
+  EXPECT_EQ(answer_or_error.value().data_transport->port, 4321);
+  EXPECT_EQ(answer_or_error.value().data_transport->certificate_fingerprint,
+            "abcde12345");
+
+  // Serialization check.
+  Json::Value serialized = answer_or_error.value().ToJson();
+  EXPECT_TRUE(serialized.isMember("dataTransport"));
+  EXPECT_EQ(serialized["dataTransport"]["protocol"].asString(), "webtransport");
+  EXPECT_EQ(serialized["dataTransport"]["port"].asInt(), 4321);
+  EXPECT_EQ(serialized["dataTransport"]["certificateFingerprint"].asString(),
+            "abcde12345");
+}
+
+TEST(AnswerTest, ErrorOnInvalidDataTransport) {
+  ErrorOr<Json::Value> root = json::Parse(
+      GenerateAnswerWithDataTransport("webtransport", -1, "abcde12345"));
+  ASSERT_TRUE(root.is_value()) << root.error();
+  EXPECT_TRUE(Answer::TryParse(std::move(root.value())).is_error());
+
+  root = json::Parse(
+      GenerateAnswerWithDataTransport("webtransport", 65536, "abcde12345"));
+  ASSERT_TRUE(root.is_value()) << root.error();
+  EXPECT_TRUE(Answer::TryParse(std::move(root.value())).is_error());
+
+  root = json::Parse(GenerateAnswerWithDataTransport("webtransport", 4321, ""));
+  ASSERT_TRUE(root.is_value()) << root.error();
+  EXPECT_TRUE(Answer::TryParse(std::move(root.value())).is_error());
+
+  root =
+      json::Parse(GenerateAnswerWithDataTransport("QUIC", 4321, "abcde12345"));
+  ASSERT_TRUE(root.is_value()) << root.error();
+  EXPECT_TRUE(Answer::TryParse(std::move(root.value())).is_error());
 }
 
 // Instead of being tested here, Answer's IsValid is checked in all other

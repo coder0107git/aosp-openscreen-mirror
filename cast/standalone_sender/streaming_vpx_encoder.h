@@ -23,6 +23,8 @@
 #include "cast/streaming/rtp_time.h"
 #include "platform/api/task_runner.h"
 #include "platform/api/time.h"
+#include "util/thread_annotations.h"
+#include "util/weak_ptr.h"
 
 namespace openscreen {
 
@@ -102,7 +104,7 @@ class StreamingVpxEncoder : public StreamingVideoEncoder {
   // The procedure for the `encode_thread_` that loops, processing work units
   // from the `encode_queue_` by calling Encode() until it's time to end the
   // thread.
-  void ProcessWorkUnitsUntilTimeToQuit();
+  void ProcessWorkUnitsUntilTimeToQuit() OSP_NO_THREAD_SAFETY_ANALYSIS;
 
   // If the `encoder_` is live, attempt reconfiguration to allow it to encode
   // frames at a new frame size or target bitrate. If reconfiguration is not
@@ -135,23 +137,22 @@ class StreamingVpxEncoder : public StreamingVideoEncoder {
   RtpTimeTicks last_enqueued_rtp_timestamp_;
 
   // Guards a few members shared by both the main and encode threads.
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
 
   // Used by the encode thread to sleep until more work is available.
-  std::condition_variable cv_;  // ABSL_GUARDED_BY(mutex_)
+  std::condition_variable cv_;
 
   // These encode parameters not passed in the WorkUnit struct because it is
   // desirable for them to be applied as soon as possible, with the very next
   // WorkUnit popped from the `encode_queue_` on the encode thread, and not to
   // wait until some later WorkUnit is processed.
-  bool needs_key_frame_ /* ABSL_GUARDED_BY(mutex_) */ = true;
-  int target_bitrate_ /* ABSL_GUARDED_BY(mutex_) */ =
-      2 << 20;  // Default: 2 Mbps.
+  bool needs_key_frame_ OSP_GUARDED_BY(mutex_) = true;
+  int target_bitrate_ OSP_GUARDED_BY(mutex_) = 2 << 20;  // Default: 2 Mbps.
 
   // The queue of frame encodes. The size of this queue is implicitly bounded by
   // EncodeAndSend(), where it checks for the total in-flight media duration and
   // maybe drops a frame.
-  std::queue<WorkUnit> encode_queue_;  // ABSL_GUARDED_BY(mutex_)
+  std::queue<WorkUnit> encode_queue_ OSP_GUARDED_BY(mutex_);
 
   // Current VP8 encoder configuration. Most of the fields are unchanging, and
   // are populated in the ctor; but thereafter, only the encode thread accesses
@@ -163,6 +164,8 @@ class StreamingVpxEncoder : public StreamingVideoEncoder {
 
   // libvpx VP8/9 encoder instance. Only the encode thread accesses this.
   vpx_codec_ctx_t encoder_;
+
+  WeakPtrFactory<StreamingVpxEncoder> weak_factory_{this};
 };
 
 }  // namespace cast

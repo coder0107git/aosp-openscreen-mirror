@@ -24,7 +24,7 @@ Environment::Environment(ClockNowFunctionPtr now_function,
     : now_function_(now_function), task_runner_(task_runner) {
   OSP_CHECK(now_function_);
   ErrorOr<std::unique_ptr<UdpSocket>> result =
-      UdpSocket::Create(task_runner_, this, local_endpoint);
+      UdpSocket::Create(*task_runner_, this, local_endpoint);
   if (result.is_error()) {
     OSP_LOG_ERROR << "Unable to create a UDP socket bound to " << local_endpoint
                   << ": " << result.error();
@@ -90,6 +90,24 @@ int Environment::GetMaxPacketSize() const {
       return kMaxRtpPacketSizeForIpv6UdpOnEthernet;
     default:
       OSP_NOTREACHED();
+  }
+}
+
+void Environment::SetDscp(UdpSocket::DscpMode mode) {
+  if (socket_) {
+    socket_->SetDscp(mode);
+  }
+}
+
+void Environment::SetReceiveBufferSize(size_t size) {
+  if (socket_) {
+    socket_->SetReceiveBufferSize(size);
+  }
+}
+
+void Environment::SetSendBufferSize(size_t size) {
+  if (socket_) {
+    socket_->SetSendBufferSize(size);
   }
 }
 

@@ -151,6 +151,8 @@ struct SimpleHistogram {
   std::string GetBucketName(size_t index) const;
 };
 
+std::ostream& operator<<(std::ostream& out, const SimpleHistogram& histogram);
+
 struct SenderStats {
   using StatisticsList =
       std::array<double, static_cast<size_t>(StatisticType::kNumTypes)>;
@@ -159,20 +161,22 @@ struct SenderStats {
                  static_cast<size_t>(HistogramType::kNumTypes)>;
 
   // The current audio statistics.
-  StatisticsList audio_statistics;
+  StatisticsList audio_statistics = {};
 
   // The current audio histograms.
-  HistogramsList audio_histograms;
+  HistogramsList audio_histograms = {};
 
   // The current video statistics.
-  StatisticsList video_statistics;
+  StatisticsList video_statistics = {};
 
   // The current video histograms.
-  HistogramsList video_histograms;
+  HistogramsList video_histograms = {};
 
   Json::Value ToJson() const;
   std::string ToString() const;
 };
+
+std::ostream& operator<<(std::ostream& out, const SenderStats& stats);
 
 // The consumer may provide a statistics client if they are interested in
 // getting statistics about the ongoing session.

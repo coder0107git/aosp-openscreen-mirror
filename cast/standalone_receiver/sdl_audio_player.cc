@@ -4,11 +4,12 @@
 
 #include "cast/standalone_receiver/sdl_audio_player.h"
 
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 #include <utility>
 
-#include "cast/standalone_receiver/avcodec_glue.h"
+#include "cast/standalone_common/ffmpeg_glue.h"
 #include "platform/base/span.h"
 #include "util/big_endian.h"
 #include "util/chrono_helpers.h"

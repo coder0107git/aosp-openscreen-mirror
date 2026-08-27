@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "discovery/common/reporting_client.h"
@@ -221,7 +222,7 @@ void QuerierImpl::StartQuery(const std::string& service, Callback* callback) {
 
   // Start tracking the new callback
   const ServiceKey key(service, kLocalDomain);
-  auto it = callback_map_.emplace(key, std::vector<Callback*>{}).first;
+  auto it = callback_map_.emplace(key, std::vector<raw_ptr<Callback>>{}).first;
   it->second.push_back(callback);
 
   const DomainName domain = key.GetName();
@@ -232,8 +233,8 @@ void QuerierImpl::StartQuery(const std::string& service, Callback* callback) {
     std::function<void(const DomainName&)> mdns_query(
         [this, &domain](const DomainName& changed_domain) {
           OSP_DVLOG << "Starting mDNS query for '" << domain << "'";
-          mdns_querier_.StartQuery(changed_domain, DnsType::kANY,
-                                   DnsClass::kANY, this);
+          mdns_querier_->StartQuery(changed_domain, DnsType::kANY,
+                                    DnsClass::kANY, this);
         });
     graph_->StartTracking(domain, std::move(mdns_query));
     return;
@@ -261,7 +262,7 @@ void QuerierImpl::StopQuery(const std::string& service, Callback* callback) {
     return;
   }
 
-  std::vector<Callback*>& callbacks = callbacks_it->second;
+  std::vector<raw_ptr<Callback>>& callbacks = callbacks_it->second;
   const auto it = std::find(callbacks.begin(), callbacks.end(), callback);
   if (it == callbacks.end()) {
     return;
@@ -276,8 +277,8 @@ void QuerierImpl::StopQuery(const std::string& service, Callback* callback) {
     std::function<void(const DomainName&)> stop_mdns_query(
         [this](const DomainName& changed_domain) {
           OSP_DVLOG << "Stopping mDNS query for '" << changed_domain << "'";
-          mdns_querier_.StopQuery(changed_domain, DnsType::kANY, DnsClass::kANY,
-                                  this);
+          mdns_querier_->StopQuery(changed_domain, DnsType::kANY,
+                                   DnsClass::kANY, this);
         });
     graph_->StopTracking(domain, std::move(stop_mdns_query));
   }
@@ -296,16 +297,16 @@ void QuerierImpl::ReinitializeQueries(const std::string& service) {
 
   std::function<void(const DomainName&)> start_callback(
       [this](const DomainName& d) {
-        mdns_querier_.StartQuery(d, DnsType::kANY, DnsClass::kANY, this);
+        mdns_querier_->StartQuery(d, DnsType::kANY, DnsClass::kANY, this);
       });
   std::function<void(const DomainName&)> stop_callback(
       [this](const DomainName& d) {
-        mdns_querier_.StopQuery(d, DnsType::kANY, DnsClass::kANY, this);
+        mdns_querier_->StopQuery(d, DnsType::kANY, DnsClass::kANY, this);
       });
   graph_->StopTracking(domain, std::move(stop_callback));
 
   // Restart top-level queries.
-  mdns_querier_.ReinitializeQueries(GetPtrQueryInfo(key).name);
+  mdns_querier_->ReinitializeQueries(GetPtrQueryInfo(key).name);
 
   graph_->StartTracking(domain, std::move(start_callback));
 }
@@ -319,7 +320,7 @@ std::vector<PendingQueryChange> QuerierImpl::OnRecordChanged(
 #endif
 
   std::function<void(Error)> log = [this](Error error) mutable {
-    reporting_client_.OnRecoverableError(
+    reporting_client_->OnRecoverableError(
         Error(Error::Code::kProcessReceivedRecordFailure));
   };
 
@@ -328,7 +329,7 @@ std::vector<PendingQueryChange> QuerierImpl::OnRecordChanged(
   const DomainName& create_endpoints_domain =
       record.dns_type() != DnsType::kPTR
           ? record.name()
-          : absl::get<PtrRecordRdata>(record.rdata()).ptr_domain();
+          : std::get<PtrRecordRdata>(record.rdata()).ptr_domain();
   const DnsDataGraph::DomainGroup create_endpoints_group =
       record.dns_type() != DnsType::kPTR
           ? DnsDataGraph::GetDomainGroup(record)
@@ -414,7 +415,7 @@ void QuerierImpl::InvokeChangeCallbacks(
   }
 
   // Call relevant callbacks.
-  std::vector<Callback*>& callbacks = it->second;
+  std::vector<raw_ptr<Callback>>& callbacks = it->second;
   for (Callback* callback : callbacks) {
     for (const DnsSdInstanceEndpoint& endpoint : created) {
       callback->OnEndpointCreated(endpoint);

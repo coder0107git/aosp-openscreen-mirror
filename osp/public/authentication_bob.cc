@@ -22,15 +22,14 @@ AuthenticationBob::~AuthenticationBob() = default;
 
 void AuthenticationBob::StartAuthentication() {
   if (!auth_data_.sender) {
-    delegate_.OnAuthenticationFailed(instance_id_,
-                                     Error::Code::kNoActiveConnection);
+    delegate_->OnAuthenticationFailed(instance_id_,
+                                      Error::Code::kNoActiveConnection);
     return;
   }
 
   msgs::AuthSpake2Handshake message = {
       .initiation_token =
           msgs::AuthInitiationToken{
-              .has_token = true,
               .token = auth_data_.auth_token,
           },
       .psk_status = msgs::AuthSpake2PskStatus::kPskNeedsPresentation,
@@ -46,8 +45,8 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
                                                    Clock::time_point now) {
   OSP_CHECK_EQ(instance_id_, instance_id);
   if (!auth_data_.sender) {
-    delegate_.OnAuthenticationFailed(instance_id,
-                                     Error::Code::kNoActiveConnection);
+    delegate_->OnAuthenticationFailed(instance_id,
+                                      Error::Code::kNoActiveConnection);
     return Error::Code::kNoActiveConnection;
   }
 
@@ -62,15 +61,15 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
         }
         Error error{Error::Code::kCborParsing,
                     "Failed to parse AuthSpake2Handshake message."};
-        delegate_.OnAuthenticationFailed(instance_id, error);
+        delegate_->OnAuthenticationFailed(instance_id, error);
         return Error::Code::kCborParsing;
       } else {
         auto& initiation_token = handshake.initiation_token;
-        if (!initiation_token.has_token ||
+        if (!initiation_token.token.has_value() ||
             initiation_token.token != auth_data_.auth_token) {
           Error error{Error::Code::kInvalidAnswer,
                       "Authentication failed: initiation token mismatch."};
-          delegate_.OnAuthenticationFailed(instance_id, error);
+          delegate_->OnAuthenticationFailed(instance_id, error);
           return result;
         }
 
@@ -82,7 +81,6 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
           msgs::AuthSpake2Handshake message = {
               .initiation_token =
                   msgs::AuthInitiationToken{
-                      .has_token = true,
                       .token = initiation_token.token,
                   },
               .psk_status = msgs::AuthSpake2PskStatus::kPskInput,
@@ -101,7 +99,7 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
         } else {
           Error error{Error::Code::kInvalidAnswer,
                       "Authentication failed: receive wrong PSK status."};
-          delegate_.OnAuthenticationFailed(instance_id, error);
+          delegate_->OnAuthenticationFailed(instance_id, error);
         }
         return result;
       }
@@ -117,7 +115,7 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
         }
         Error error{Error::Code::kCborParsing,
                     "Failed to parse AuthSpake2Confirmation message."};
-        delegate_.OnAuthenticationFailed(instance_id, error);
+        delegate_->OnAuthenticationFailed(instance_id, error);
         return Error::Code::kCborParsing;
       } else {
         if (std::equal(auth_data_.shared_key.begin(),
@@ -126,14 +124,14 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
           msgs::AuthStatus status = {
               .result = msgs::AuthStatusResult::kAuthenticated};
           auth_data_.sender->WriteMessage(status, &msgs::EncodeAuthStatus);
-          delegate_.OnAuthenticationSucceed(instance_id);
+          delegate_->OnAuthenticationSucceed(instance_id);
         } else {
           msgs::AuthStatus status = {.result =
                                          msgs::AuthStatusResult::kProofInvalid};
           auth_data_.sender->WriteMessage(status, &msgs::EncodeAuthStatus);
           Error error{Error::Code::kInvalidAnswer,
                       "Authentication failed: shared key mismatch."};
-          delegate_.OnAuthenticationFailed(instance_id, error);
+          delegate_->OnAuthenticationFailed(instance_id, error);
         }
         return result;
       }
@@ -148,16 +146,16 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
         }
         Error error{Error::Code::kCborParsing,
                     "Failed to parse AuthStatus message."};
-        delegate_.OnAuthenticationFailed(instance_id, error);
+        delegate_->OnAuthenticationFailed(instance_id, error);
         return Error::Code::kCborParsing;
       } else {
         if (status.result == msgs::AuthStatusResult::kAuthenticated) {
-          delegate_.OnAuthenticationSucceed(instance_id);
+          delegate_->OnAuthenticationSucceed(instance_id);
         } else {
           std::stringstream ss;
           ss << "Authentication failed: " << status.result;
           Error error{Error::Code::kInvalidAnswer, ss.str()};
-          delegate_.OnAuthenticationFailed(instance_id, error);
+          delegate_->OnAuthenticationFailed(instance_id, error);
         }
         return result;
       }
@@ -166,7 +164,7 @@ ErrorOr<size_t> AuthenticationBob::OnStreamMessage(uint64_t instance_id,
     default: {
       Error error{Error::Code::kCborParsing,
                   "Receives authentication message with unprocessable type."};
-      delegate_.OnAuthenticationFailed(instance_id, error);
+      delegate_->OnAuthenticationFailed(instance_id, error);
       return Error::Code::kCborParsing;
     }
   }

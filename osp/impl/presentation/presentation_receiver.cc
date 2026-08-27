@@ -36,8 +36,7 @@ Error Receiver::CloseConnection(Connection* connection,
   msgs::PresentationConnectionCloseEvent event = {
       .connection_id = connection->connection_id(),
       .reason = ConvertCloseEventReason(reason),
-      .connection_count = connection_manager_->ConnectionCount(),
-      .has_error_message = false};
+      .connection_count = connection_manager_->ConnectionCount()};
   return protocol_connection->WriteMessage(
       event, msgs::EncodePresentationConnectionCloseEvent);
 }
@@ -58,7 +57,7 @@ Error Receiver::OnPresentationTerminated(const std::string& presentation_id,
     return Error::Code::kNoActiveConnection;
   }
 
-  for (auto* connection : presentation.connections) {
+  for (auto connection : presentation.connections) {
     connection->OnTerminated();
   }
 
@@ -88,7 +87,7 @@ void Receiver::OnConnectionDestroyed(Connection* connection) {
     return;
   }
 
-  std::vector<Connection*>& connections =
+  std::vector<raw_ptr<Connection>>& connections =
       presentation_entry->second.connections;
   connections.erase(
       std::remove(connections.begin(), connections.end(), connection),

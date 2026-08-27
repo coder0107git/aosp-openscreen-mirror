@@ -16,7 +16,6 @@
 #include "util/chrono_helpers.h"
 
 using testing::_;
-using testing::Invoke;
 using testing::Mock;
 using testing::SaveArg;
 using testing::StrictMock;
@@ -176,7 +175,7 @@ TEST_F(CompoundRtcpParserTest, OnCastReceiverFrameLogMessages_ValidPacket) {
   EXPECT_EQ(1u, messages[0].messages.size());
 
   const RtcpReceiverEventLogMessage& log = messages[0].messages[0];
-  EXPECT_EQ(StatisticsEventType::kPacketReceived, log.type);
+  EXPECT_EQ(StatisticsEvent::Type::kPacketReceived, log.type);
   EXPECT_EQ(session()->start_time() + microseconds{1057321000}, log.timestamp);
   EXPECT_EQ(milliseconds{}, log.delay);
   EXPECT_EQ(FramePacketId{7701}, log.packet_id);
@@ -222,14 +221,14 @@ TEST_F(CompoundRtcpParserTest,
 
   // Note: the first log message is removed due to it being an invalid type.
   const RtcpReceiverEventLogMessage& second_log = first_message.messages[0];
-  EXPECT_EQ(StatisticsEventType::kPacketReceived, second_log.type);
+  EXPECT_EQ(StatisticsEvent::Type::kPacketReceived, second_log.type);
   EXPECT_EQ(session()->start_time() + microseconds{1057097000},
             second_log.timestamp);
   EXPECT_EQ(milliseconds{}, second_log.delay);
   EXPECT_EQ(FramePacketId{277}, second_log.packet_id);
 
   const RtcpReceiverEventLogMessage& third_log = first_message.messages[1];
-  EXPECT_EQ(StatisticsEventType::kFramePlayedOut, third_log.type);
+  EXPECT_EQ(StatisticsEvent::Type::kFramePlayedOut, third_log.type);
   EXPECT_EQ(session()->start_time() + microseconds{1057367000},
             third_log.timestamp);
   EXPECT_EQ(milliseconds{535}, third_log.delay);
@@ -242,7 +241,7 @@ TEST_F(CompoundRtcpParserTest,
 
   const RtcpReceiverEventLogMessage& second_first_log =
       second_message.messages[0];
-  EXPECT_EQ(StatisticsEventType::kPacketReceived, second_first_log.type);
+  EXPECT_EQ(StatisticsEvent::Type::kPacketReceived, second_first_log.type);
   EXPECT_EQ(session()->start_time() + microseconds{4203049000},
             second_first_log.timestamp);
   EXPECT_EQ(milliseconds{}, second_first_log.delay);
@@ -306,6 +305,20 @@ TEST_F(CompoundRtcpParserTest,
 
   // Should throw an error--the packet is malformed.
   EXPECT_FALSE(parser()->Parse(kPacketWithInvalidPacketSize, FrameId::first()));
+}
+
+TEST_F(CompoundRtcpParserTest, OnCastReceiverFrameLogMessages_ShortPayload) {
+  // clang-format off
+  const uint8_t kShortAppPacket[] = {
+      0b10000000 | 2,          // Version=2, Padding=no, Subtype=ReceiverLog.
+      204,                     // RTCP Packet type of application defined.
+      0x00, 0x01,              // Length of remainder of packet in 32-bit words (only 4 bytes).
+      0x00, 0x00, 0x00, 0x02,  // Receiver SSRC (4 bytes total payload).
+  };
+  // clang-format on
+
+  // Should return false because payload is shorter than 2 * sizeof(uint32_t).
+  EXPECT_FALSE(parser()->Parse(kShortAppPacket, FrameId::first()));
 }
 
 // Tests that RTCP packets containing chronologically-old data are ignored. This

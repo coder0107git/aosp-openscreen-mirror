@@ -1,12 +1,17 @@
 # Primary owners.
 mfoltz@chromium.org
-jopbha@chromium.org
+jophba@chromium.org
 
 # Additional reviewers as needed.
-muyaoxu@google.com
-takumif@chromium.org
+taesuny@google.com
 
-# Former OWNERS
-# btolsch@chromium.org
-# rwkeane@google.com
-# cliffordcheng@chromium.org
+per-file DEPS=*
+
+# Git submodules managed by autorollers
+per-file third_party/clang-format/script=*
+per-file third_party/googletest/src=*
+per-file third_party/libfuzzer/src=*
+per-file third_party/libprotobuf-mutator/src=*
+per-file third_party/modp_b64=*
+per-file third_party/perfetto/src=*
+per-file third_party/tinycbor/src=*

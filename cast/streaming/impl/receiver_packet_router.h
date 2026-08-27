@@ -14,6 +14,8 @@
 #include "cast/streaming/ssrc.h"
 #include "platform/base/span.h"
 #include "util/flat_map.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::cast {
 
@@ -26,21 +28,29 @@ class Receiver;
 // filtered-out.
 class ReceiverPacketRouter final : public Environment::PacketConsumer {
  public:
+  class PacketConsumer {
+   public:
+    virtual void OnReceivedRtpPacket(Clock::time_point arrival_time,
+                                     std::vector<uint8_t> packet) = 0;
+    virtual void OnReceivedRtcpPacket(Clock::time_point arrival_time,
+                                      std::span<const uint8_t> packet) = 0;
+
+   protected:
+    virtual ~PacketConsumer() = default;
+  };
+
   explicit ReceiverPacketRouter(Environment& environment);
   ~ReceiverPacketRouter() final;
 
- protected:
-  friend class Receiver;
+  // Called from a PacketConsumer constructor/destructor to register/deregister
+  // a PacketConsumer instance that processes RTP/RTCP packets from a Sender
+  // having the given SSRC.
+  void RegisterPacketConsumer(Ssrc sender_ssrc, PacketConsumer* consumer);
+  void DeregisterPacketConsumer(Ssrc sender_ssrc);
 
-  // Called from a Receiver constructor/destructor to register/deregister a
-  // Receiver instance that processes RTP/RTCP packets from a Sender having the
-  // given SSRC.
-  void OnReceiverCreated(Ssrc sender_ssrc, Receiver* receiver);
-  void OnReceiverDestroyed(Ssrc sender_ssrc);
-
-  // Called by a Receiver to send a RTCP packet back to the source from which
-  // earlier packets were received, or does nothing if OnReceivedPacket() has
-  // not been called yet.
+  // Called by a PacketConsumer to send a RTCP packet back to the source from
+  // which earlier packets were received, or does nothing if OnReceivedPacket()
+  // has not been called yet.
   void SendRtcpPacket(ByteView packet);
 
  private:
@@ -49,9 +59,9 @@ class ReceiverPacketRouter final : public Environment::PacketConsumer {
                         Clock::time_point arrival_time,
                         std::vector<uint8_t> packet) final;
 
-  Environment& environment_;
+  const raw_ref<Environment> environment_;
 
-  FlatMap<Ssrc, Receiver*> receivers_;
+  FlatMap<Ssrc, raw_ptr<PacketConsumer>> receivers_;
 };
 
 }  // namespace openscreen::cast

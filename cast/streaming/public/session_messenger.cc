@@ -4,6 +4,7 @@
 
 #include "cast/streaming/public/session_messenger.h"
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 
@@ -39,9 +40,9 @@ void ReplyIfTimedOut(
       // replies vector.
       SenderSessionMessenger::ReplyCallback callback = std::move(it->second);
       replies->erase(it);
-      callback(Error(Error::Code::kMessageTimeout,
-                     string_util::StrCat({"message timed out; max delay of ",
-                                          ToString(kReplyTimeout)})));
+      callback(Error(
+          Error::Code::kMessageTimeout,
+          StrCat("message timed out; max delay of ", ToString(kReplyTimeout))));
       return;
     }
   }
@@ -56,11 +57,11 @@ SessionMessenger::SessionMessenger(MessagePort& message_port,
       source_id_(source_id),
       error_callback_(std::move(cb)) {
   OSP_CHECK(!source_id_.empty());
-  message_port_.SetClient(*this);
+  message_port_->SetClient(*this);
 }
 
 SessionMessenger::~SessionMessenger() {
-  message_port_.ResetClient();
+  message_port_->ResetClient();
 }
 
 Error SessionMessenger::SendMessage(const std::string& destination_id,
@@ -75,7 +76,7 @@ Error SessionMessenger::SendMessage(const std::string& destination_id,
   OSP_VLOG << "Sending message: DESTINATION[" << destination_id
            << "], NAMESPACE[" << namespace_ << "], BODY:\n"
            << body_or_error.value();
-  message_port_.PostMessage(destination_id, namespace_, body_or_error.value());
+  message_port_->PostMessage(destination_id, namespace_, body_or_error.value());
   return Error::None();
 }
 
@@ -94,18 +95,29 @@ SenderSessionMessenger::SenderSessionMessenger(MessagePort& message_port,
 
 void SenderSessionMessenger::SetHandler(ReceiverMessage::Type type,
                                         ReplyCallback cb) {
-  // Currently the only handler allowed is for RPC messages.
-  OSP_CHECK(type == ReceiverMessage::Type::kRpc);
-  rpc_callback_ = std::move(cb);
+  // Currently the only handlers allowed are for RPC and INPUT messages.
+  if (type == ReceiverMessage::Type::kRpc) {
+    rpc_callback_ = std::move(cb);
+  } else if (type == ReceiverMessage::Type::kInput) {
+    input_callback_ = std::move(cb);
+  } else {
+    OSP_NOTREACHED();
+  }
 }
 
 void SenderSessionMessenger::ResetHandler(ReceiverMessage::Type type) {
-  OSP_CHECK(type == ReceiverMessage::Type::kRpc);
-  rpc_callback_ = {};
+  if (type == ReceiverMessage::Type::kRpc) {
+    rpc_callback_ = {};
+  } else if (type == ReceiverMessage::Type::kInput) {
+    input_callback_ = {};
+  } else {
+    OSP_NOTREACHED();
+  }
 }
 
 Error SenderSessionMessenger::SendOutboundMessage(SenderMessage message) {
-  const auto namespace_ = (message.type == SenderMessage::Type::kRpc)
+  const auto namespace_ = (message.type == SenderMessage::Type::kRpc ||
+                           message.type == SenderMessage::Type::kInput)
                               ? kCastRemotingNamespace
                               : kCastWebrtcNamespace;
 
@@ -122,11 +134,19 @@ Error SenderSessionMessenger::SendRpcMessage(ByteView message) {
       std::vector<uint8_t>(message.begin(), message.end())});
 }
 
+Error SenderSessionMessenger::SendInputMessage(ByteView message) {
+  return SendOutboundMessage(SenderMessage{
+      openscreen::cast::SenderMessage::Type::kInput,
+      -1 /* sequence_number, unused by INPUT messages */, true /* valid */,
+      std::vector<uint8_t>(message.begin(), message.end())});
+}
+
 Error SenderSessionMessenger::SendRequest(SenderMessage message,
                                           ReceiverMessage::Type reply_type,
                                           ReplyCallback cb) {
-  // RPC messages are not meant to be request/reply.
+  // RPC and INPUT messages are not meant to be request/reply.
   OSP_CHECK(reply_type != ReceiverMessage::Type::kRpc);
+  OSP_CHECK(reply_type != ReceiverMessage::Type::kInput);
 
   if (!cb) {
     return Error(Error::Code::kParameterInvalid,
@@ -140,7 +160,7 @@ Error SenderSessionMessenger::SendRequest(SenderMessage message,
   OSP_DCHECK(awaiting_replies_.find(message.sequence_number) ==
              awaiting_replies_.end());
   awaiting_replies_.emplace_back(message.sequence_number, std::move(cb));
-  task_runner_.PostTaskWithDelay(
+  task_runner_->PostTaskWithDelay(
       [self = weak_factory_.GetWeakPtr(), seq_num = message.sequence_number] {
         if (self) {
           ReplyIfTimedOut(seq_num, &self->awaiting_replies_);
@@ -168,7 +188,7 @@ void SenderSessionMessenger::OnMessage(const std::string& source_id,
   }
 
   ErrorOr<Json::Value> message_body = json::Parse(message);
-  if (!message_body) {
+  if (!message_body || !message_body.value().isObject()) {
     ReportError(message_body.error());
     OSP_DLOG_WARN << "Received an invalid message: " << message;
     return;
@@ -193,6 +213,12 @@ void SenderSessionMessenger::OnMessage(const std::string& source_id,
       rpc_callback_(receiver_message.value());
     } else {
       OSP_DLOG_INFO << "Received RPC message but no callback, dropping";
+    }
+  } else if (receiver_message.value().type == ReceiverMessage::Type::kInput) {
+    if (input_callback_) {
+      input_callback_(receiver_message.value());
+    } else {
+      OSP_DLOG_INFO << "Received INPUT message but no callback, dropping";
     }
   } else {
     const int sequence_number = receiver_message.value().sequence_number;
@@ -229,6 +255,24 @@ void ReceiverSessionMessenger::ResetHandler(SenderMessage::Type type) {
   callbacks_.erase_key(type);
 }
 
+Error ReceiverSessionMessenger::SendRpcMessage(const std::string& source_id,
+                                               ByteView message) {
+  return SendMessage(
+      source_id,
+      ReceiverMessage{ReceiverMessage::Type::kRpc, -1 /* sequence_number */,
+                      true /* valid */,
+                      std::vector<uint8_t>(message.begin(), message.end())});
+}
+
+Error ReceiverSessionMessenger::SendInputMessage(const std::string& source_id,
+                                                 ByteView message) {
+  return SendMessage(
+      source_id,
+      ReceiverMessage{ReceiverMessage::Type::kInput, -1 /* sequence_number */,
+                      true /* valid */,
+                      std::vector<uint8_t>(message.begin(), message.end())});
+}
+
 Error ReceiverSessionMessenger::SendMessage(const std::string& source_id,
                                             ReceiverMessage message) {
   if (source_id.empty()) {
@@ -236,7 +280,8 @@ Error ReceiverSessionMessenger::SendMessage(const std::string& source_id,
                  "Cannot send a message without a current source ID.");
   }
 
-  const auto namespace_ = (message.type == ReceiverMessage::Type::kRpc)
+  const auto namespace_ = (message.type == ReceiverMessage::Type::kRpc ||
+                           message.type == ReceiverMessage::Type::kInput)
                               ? kCastRemotingNamespace
                               : kCastWebrtcNamespace;
 
@@ -246,11 +291,55 @@ Error ReceiverSessionMessenger::SendMessage(const std::string& source_id,
                                        message_json.value());
 }
 
+void ReceiverSessionMessenger::SetCustomMessageHandler(
+    std::string_view message_namespace,
+    CustomMessageCallback cb) {
+  auto it = std::find_if(custom_message_handlers_.begin(),
+                         custom_message_handlers_.end(),
+                         [&message_namespace](const auto& pair) {
+                           return pair.first == message_namespace;
+                         });
+
+  if (!cb) {
+    if (it != custom_message_handlers_.end()) {
+      custom_message_handlers_.erase(it);
+    }
+    return;
+  }
+
+  if (it != custom_message_handlers_.end()) {
+    OSP_LOG_ERROR << "Handler already exists for namespace: "
+                  << message_namespace;
+    return;
+  } else {
+    custom_message_handlers_.emplace_back(std::string(message_namespace),
+                                          std::move(cb));
+  }
+}
+
+Error ReceiverSessionMessenger::SendMessage(std::string_view destination_id,
+                                            std::string_view message_namespace,
+                                            std::string_view message) {
+  message_port().PostMessage(std::string(destination_id),
+                             std::string(message_namespace),
+                             std::string(message));
+  return Error::None();
+}
+
 void ReceiverSessionMessenger::OnMessage(const std::string& source_id,
                                          const std::string& message_namespace,
                                          const std::string& message) {
   if (message_namespace != kCastWebrtcNamespace &&
       message_namespace != kCastRemotingNamespace) {
+    auto it = std::find_if(custom_message_handlers_.begin(),
+                           custom_message_handlers_.end(),
+                           [&message_namespace](const auto& pair) {
+                             return pair.first == message_namespace;
+                           });
+    if (it != custom_message_handlers_.end()) {
+      it->second(source_id, message_namespace, message);
+      return;
+    }
     OSP_DLOG_WARN << "Received message from unknown namespace: "
                   << message_namespace;
     return;
@@ -259,7 +348,7 @@ void ReceiverSessionMessenger::OnMessage(const std::string& source_id,
   // If the message is bad JSON, the sender is in a funky state so we
   // report an error.
   ErrorOr<Json::Value> message_body = json::Parse(message);
-  if (message_body.is_error()) {
+  if (message_body.is_error() || !message_body.value().isObject()) {
     ReportError(message_body.error());
     return;
   }

@@ -12,8 +12,8 @@
 #include "discovery/common/config.h"
 #include "discovery/mdns/public/mdns_records.h"
 #include "platform/api/time.h"
-#include "platform/base/macros.h"
 #include "util/alarm.h"
+#include "util/raw_ref.h"
 
 namespace openscreen {
 
@@ -73,7 +73,10 @@ class MdnsResponder {
                 const Config& config);
   ~MdnsResponder();
 
-  OSP_DISALLOW_COPY_AND_ASSIGN(MdnsResponder);
+  MdnsResponder(const MdnsResponder&) = delete;
+  MdnsResponder(MdnsResponder&&) noexcept = delete;
+  MdnsResponder& operator=(const MdnsResponder&) = delete;
+  MdnsResponder& operator=(MdnsResponder&&) = delete;
 
  private:
   // Class which handles processing and responding to queries segmented into
@@ -90,9 +93,8 @@ class MdnsResponder {
                    const Config& config);
     TruncatedQuery(const TruncatedQuery& other) = delete;
     TruncatedQuery(TruncatedQuery&& other) noexcept = delete;
-
     TruncatedQuery& operator=(const TruncatedQuery& other) = delete;
-    TruncatedQuery& operator=(TruncatedQuery&& other) noexcept = delete;
+    TruncatedQuery& operator=(TruncatedQuery&& other) = delete;
 
     // Sets the query associated with this instance. Must only be called if no
     // query has already been set, here or through the ctor.
@@ -120,7 +122,7 @@ class MdnsResponder {
     const int max_allowed_messages_;
     const int max_allowed_records_;
     const IPEndpoint src_;
-    MdnsResponder& responder_;
+    const raw_ref<MdnsResponder> responder_;
 
     std::vector<MdnsQuestion> questions_;
     std::vector<MdnsRecord> known_answers_;
@@ -154,13 +156,13 @@ class MdnsResponder {
   // NOTE: unique_ptrs used because TruncatedQuery is not movable.
   std::map<IPEndpoint, std::unique_ptr<TruncatedQuery>> truncated_queries_;
 
-  RecordHandler& record_handler_;
-  MdnsProbeManager& ownership_handler_;
-  MdnsSender& sender_;
-  MdnsReceiver& receiver_;
-  TaskRunner& task_runner_;
+  const raw_ref<RecordHandler> record_handler_;
+  const raw_ref<MdnsProbeManager> ownership_handler_;
+  const raw_ref<MdnsSender> sender_;
+  const raw_ref<MdnsReceiver> receiver_;
+  const raw_ref<TaskRunner> task_runner_;
   const ClockNowFunctionPtr now_function_;
-  MdnsRandom& random_delay_;
+  const raw_ref<MdnsRandom> random_delay_;
   Config config_;
 
   friend class MdnsResponderTest;

@@ -13,6 +13,8 @@
 #include "platform/impl/platform_client_posix.h"
 #include "platform/impl/stream_socket_posix.h"
 #include "platform/impl/tls_write_buffer.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 #include "util/weak_ptr.h"
 
 namespace openscreen {
@@ -22,6 +24,10 @@ class TlsConnectionFactoryPosix;
 
 class TlsConnectionPosix : public TlsConnection {
  public:
+  TlsConnectionPosix(const TlsConnectionPosix&) = delete;
+  TlsConnectionPosix(TlsConnectionPosix&&) noexcept = delete;
+  TlsConnectionPosix& operator=(const TlsConnectionPosix&) = delete;
+  TlsConnectionPosix& operator=(TlsConnectionPosix&&) = delete;
   ~TlsConnectionPosix() override;
 
   // Sends any available bytes from this connection's buffer_.
@@ -40,6 +46,17 @@ class TlsConnectionPosix : public TlsConnection {
   // automatically by TlsConnectionFactoryPosix after the handshake completes.
   void RegisterConnectionWithDataRouter(PlatformClientPosix* platform_client);
 
+  // Returns true if there is data in the buffer that needs to be written,
+  // AND the write path is not currently blocked by a pending read (e.g.
+  // during TLS renegotiation, returning SSL_ERROR_WANT_READ).
+  // Returning false here prevents the SocketHandleWaiter from polling for
+  // writability, which would otherwise cause a busy-loop since the TCP
+  // socket remains writable but BoringSSL cannot make progress until a read
+  // occurs.
+  bool HasPendingWrite() const {
+    return !buffer_.GetReadableRegion().empty() && !is_write_blocked_by_read_;
+  }
+
   const SocketHandle& socket_handle() const { return socket_->socket_handle(); }
 
  protected:
@@ -55,19 +72,19 @@ class TlsConnectionPosix : public TlsConnection {
   // has occurred.
   void DispatchError(Error error);
 
-  TaskRunner& task_runner_;
-  PlatformClientPosix* platform_client_ = nullptr;
+  const raw_ref<TaskRunner> task_runner_;
+  raw_ptr<PlatformClientPosix> platform_client_ = nullptr;
 
-  Client* client_ = nullptr;
+  raw_ptr<Client> client_ = nullptr;
 
   std::unique_ptr<StreamSocket> socket_;
   bssl::UniquePtr<SSL> ssl_;
 
   TlsWriteBuffer buffer_;
 
-  WeakPtrFactory<TlsConnectionPosix> weak_factory_{this};
+  bool is_write_blocked_by_read_ = false;
 
-  OSP_DISALLOW_COPY_AND_ASSIGN(TlsConnectionPosix);
+  WeakPtrFactory<TlsConnectionPosix> weak_factory_{this};
 };
 
 }  // namespace openscreen

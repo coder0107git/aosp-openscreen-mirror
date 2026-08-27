@@ -85,6 +85,7 @@ class SDLPlayerBase : public Receiver::Consumer, public Decoder::Client {
  private:
   struct PendingFrame : public PresentableFrame {
     Clock::time_point start_time;
+    RtpTimeTicks rtp_timestamp;
 
     PendingFrame();
     ~PendingFrame();
@@ -93,7 +94,7 @@ class SDLPlayerBase : public Receiver::Consumer, public Decoder::Client {
   };
 
   // Receiver::Consumer implementation.
-  void OnFramesReady(int next_frame_buffer_size) final;
+  void OnFramesReady(size_t next_frame_buffer_size) final;
 
   // Determine the presentation time of the frame. Ideally, this will occur
   // based on the time progression of the media, given by the RTP timestamps.

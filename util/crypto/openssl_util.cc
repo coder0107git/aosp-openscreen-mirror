@@ -53,7 +53,7 @@ void ClearOpenSSLERRStack(const Location& location) {
       return;
     }
 
-    OSP_DVLOG << "OpenSSL ERR_get_error stack from " << location.ToString();
+    OSP_DVLOG << "OpenSSL ERR_get_error stack from " << location;
     ERR_print_errors_cb(&OpenSSLErrorCallback, nullptr);
   } else {
     ERR_clear_error();
@@ -63,8 +63,7 @@ void ClearOpenSSLERRStack(const Location& location) {
 // General note about SSL errors. Error messages are pushed to the general
 // OpenSSL error queue. Call ClearOpenSSLERRStack before calling any
 // SSL methods.
-Error GetSSLError(const SSL* ssl, int return_code) {
-  const int error_code = SSL_get_error(ssl, return_code);
+Error SSLErrorCodeToError(int error_code) {
   if (error_code == SSL_ERROR_NONE) {
     return Error::None();
   }
@@ -94,4 +93,10 @@ Error GetSSLError(const SSL* ssl, int return_code) {
   }
   OSP_NOTREACHED();
 }
+
+Error GetSSLError(const SSL* ssl, int return_code) {
+  const int error_code = SSL_get_error(ssl, return_code);
+  return SSLErrorCodeToError(error_code);
+}
+
 }  // namespace openscreen

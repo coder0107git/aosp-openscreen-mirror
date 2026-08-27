@@ -9,23 +9,25 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "cast/standalone_sender/connection_settings.h"
 #include "cast/standalone_sender/constants.h"
+#include "cast/standalone_sender/file_sender.h"
 #include "cast/standalone_sender/simulated_capturer.h"
 #include "cast/standalone_sender/streaming_opus_encoder.h"
 #include "cast/standalone_sender/streaming_video_encoder.h"
 #include "cast/streaming/public/sender_session.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::cast {
 
 // Plays the media file at a given path over and over again, transcoding and
 // streaming its audio/video.
-class LoopingFileSender final : public SimulatedAudioCapturer::Client,
+class LoopingFileSender final : public FileSender,
+                                public SimulatedAudioCapturer::Client,
                                 public SimulatedVideoCapturer::Client {
  public:
-  using ShutdownCallback = std::function<void()>;
-
   LoopingFileSender(Environment& environment,
                     ConnectionSettings settings,
                     const SenderSession* session,
@@ -34,7 +36,9 @@ class LoopingFileSender final : public SimulatedAudioCapturer::Client,
 
   ~LoopingFileSender() final;
 
-  void SetPlaybackRate(double rate);
+  void SetPlaybackRate(double rate) override;
+
+  void OnInputMessage(InputMessage message) override;
 
  private:
   void UpdateEncoderBitrates();
@@ -56,6 +60,11 @@ class LoopingFileSender final : public SimulatedAudioCapturer::Client,
 
   void UpdateStatusOnConsole();
 
+  // Draws any active animations (like mouse clicks) onto the frame.
+  void DrawAnimations(const AVFrame& av_frame,
+                      int frame_width,
+                      int frame_height);
+
   // SimulatedCapturer::Client overrides.
   void OnEndOfFile(SimulatedCapturer* capturer) final;
   void OnError(SimulatedCapturer* capturer, const std::string& message) final;
@@ -76,7 +85,7 @@ class LoopingFileSender final : public SimulatedAudioCapturer::Client,
   const ConnectionSettings settings_;
 
   // Session to query for bandwidth information.
-  const SenderSession* session_;
+  const raw_ptr<const SenderSession> session_;
 
   // Callback for tearing down the sender process.
   ShutdownCallback shutdown_callback_;
@@ -84,14 +93,22 @@ class LoopingFileSender final : public SimulatedAudioCapturer::Client,
   int bandwidth_estimate_ = 0;
   int bandwidth_being_utilized_;
 
-  StreamingOpusEncoder audio_encoder_;
+  std::unique_ptr<StreamingOpusEncoder> audio_encoder_;
   std::unique_ptr<StreamingVideoEncoder> video_encoder_;
 
   int num_capturers_running_ = 0;
   Clock::time_point capture_begin_time_{};
   Clock::time_point latest_frame_time_{};
-  std::optional<SimulatedAudioCapturer> audio_capturer_;
-  std::optional<SimulatedVideoCapturer> video_capturer_;
+  std::unique_ptr<SimulatedAudioCapturer> audio_capturer_;
+  std::unique_ptr<SimulatedVideoCapturer> video_capturer_;
+
+  struct Click {
+    float x;
+    float y;
+    Clock::time_point start_time;
+    Clock::time_point end_time;
+  };
+  std::vector<Click> active_clicks_;
 
   Alarm next_task_;
   Alarm console_update_task_;

@@ -14,6 +14,9 @@
 #include "platform/impl/socket_handle.h"
 #include "platform/impl/socket_handle_waiter.h"
 #include "platform/impl/udp_socket_posix.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
+#include "util/thread_annotations.h"
 
 namespace openscreen {
 
@@ -28,6 +31,10 @@ class UdpSocketReaderPosix : public SocketHandleWaiter::Subscriber {
   // Creates a new instance of this object.
   // NOTE: The provided NetworkWaiter must outlive this object.
   explicit UdpSocketReaderPosix(SocketHandleWaiter& waiter);
+  UdpSocketReaderPosix(const UdpSocketReaderPosix&) = delete;
+  UdpSocketReaderPosix(UdpSocketReaderPosix&&) noexcept = delete;
+  UdpSocketReaderPosix& operator=(const UdpSocketReaderPosix&) = delete;
+  UdpSocketReaderPosix& operator=(UdpSocketReaderPosix&&) = delete;
   ~UdpSocketReaderPosix() override;
 
   // Waits for `socket` to be readable and then calls the socket's
@@ -48,8 +55,8 @@ class UdpSocketReaderPosix : public SocketHandleWaiter::Subscriber {
   // SocketHandleWaiter::Subscriber overrides.
   void ProcessReadyHandle(SocketHandleRef handle, uint32_t flags) override;
 
-  OSP_DISALLOW_COPY_AND_ASSIGN(UdpSocketReaderPosix);
-
+  // NOTE: we don't subscribe to write events from the socket handle waiter.
+  bool HasPendingWrite(SocketHandleRef handle) override;
  protected:
   bool IsMappedReadForTesting(UdpSocketPosix* socket) const;
 
@@ -59,13 +66,13 @@ class UdpSocketReaderPosix : public SocketHandleWaiter::Subscriber {
                 bool disable_locking_for_testing = false);
 
   // The set of all sockets that are being read from
-  std::vector<UdpSocketPosix*> sockets_;
+  std::vector<raw_ptr<UdpSocketPosix>> sockets_ OSP_GUARDED_BY(mutex_);
 
   // Mutex to protect against concurrent modification of socket info.
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
 
   // NetworkWaiter watching this NetworkReader.
-  SocketHandleWaiter& waiter_;
+  const raw_ref<SocketHandleWaiter> waiter_;
 
   friend class TestingUdpSocketReader;
 };

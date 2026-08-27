@@ -15,6 +15,7 @@
 #include "osp/public/network_service_manager.h"
 #include "osp/public/request_response_handler.h"
 #include "util/osp_logging.h"
+#include "util/raw_ptr.h"
 #include "util/std_util.h"
 
 namespace openscreen::osp {
@@ -34,16 +35,16 @@ struct StartRequest {
   DECLARE_MSG_REQUEST_RESPONSE(Start);
 
   msgs::PresentationStartRequest request;
-  RequestDelegate* delegate;
-  Connection::Delegate* presentation_connection_delegate;
+  raw_ptr<RequestDelegate> delegate;
+  raw_ptr<Connection::Delegate> presentation_connection_delegate;
 };
 
 struct ConnectionOpenRequest {
   DECLARE_MSG_REQUEST_RESPONSE(ConnectionOpen);
 
   msgs::PresentationConnectionOpenRequest request;
-  RequestDelegate* delegate;
-  Connection::Delegate* presentation_connection_delegate;
+  raw_ptr<RequestDelegate> delegate;
+  raw_ptr<Connection::Delegate> presentation_connection_delegate;
   std::unique_ptr<Connection> connection;
 };
 
@@ -96,7 +97,7 @@ class Controller::MessageGroupStreams final
 
   void CreateProtocolConnection(bool is_initiation);
 
-  Controller* const controller_;
+  const raw_ptr<Controller> controller_;
   const std::string instance_name_;
   const uint64_t instance_id_;
   uint64_t next_internal_request_id_ = 1;
@@ -319,7 +320,7 @@ class Controller::TerminationListener final
                                   Clock::time_point now) override;
 
  private:
-  Controller* const controller_;
+  const raw_ptr<Controller> controller_;
   std::string presentation_id_;
   MessageDemuxer::MessageWatch event_watch_;
 };
@@ -364,7 +365,7 @@ ErrorOr<size_t> Controller::TerminationListener::OnStreamMessage(
   auto presentation_entry =
       controller_->presentations_by_id_.find(event.presentation_id);
   if (presentation_entry != controller_->presentations_by_id_.end()) {
-    for (auto* connection : presentation_entry->second.connections) {
+    for (auto connection : presentation_entry->second.connections) {
       connection->OnTerminated();
     }
     controller_->presentations_by_id_.erase(presentation_entry);
@@ -515,8 +516,7 @@ Error Controller::CloseConnection(Connection* connection,
   msgs::PresentationConnectionCloseEvent event = {
       .connection_id = connection->connection_id(),
       .reason = ConvertCloseEventReason(reason),
-      .connection_count = connection_manager_->ConnectionCount(),
-      .has_error_message = false};
+      .connection_count = connection_manager_->ConnectionCount()};
   return protocol_connection->WriteMessage(
       event, msgs::EncodePresentationConnectionCloseEvent);
 }
@@ -530,7 +530,7 @@ Error Controller::OnPresentationTerminated(const std::string& presentation_id,
   }
 
   ControlledPresentation& presentation = presentation_entry->second;
-  for (auto* connection : presentation.connections) {
+  for (auto connection : presentation.connections) {
     connection->OnTerminated();
   }
 
@@ -551,7 +551,7 @@ void Controller::OnConnectionDestroyed(Connection* connection) {
     return;
   }
 
-  std::vector<Connection*>& connections =
+  std::vector<raw_ptr<Connection>>& connections =
       presentation_entry->second.connections;
   connections.erase(
       std::remove(connections.begin(), connections.end(), connection),
@@ -562,9 +562,9 @@ void Controller::OnConnectionDestroyed(Connection* connection) {
 
 void Controller::BuildConnection(std::string_view instance_name) {
   std::string name(instance_name);
-  auto requset_entry = connect_requests_by_instance_name_.find(name);
-  if (requset_entry != connect_requests_by_instance_name_.end()) {
-    OSP_LOG_WARN << "There is alreay a request in progress for connecting to "
+  auto request_entry = connect_requests_by_instance_name_.find(name);
+  if (request_entry != connect_requests_by_instance_name_.end()) {
+    OSP_LOG_WARN << "There is already a request in progress for connecting to "
                  << instance_name;
     return;
   }
@@ -789,7 +789,7 @@ void Controller::OpenConnection(
 void Controller::TerminatePresentationById(const std::string& presentation_id) {
   auto presentation_entry = presentations_by_id_.find(presentation_id);
   if (presentation_entry != presentations_by_id_.end()) {
-    for (auto* connection : presentation_entry->second.connections) {
+    for (auto connection : presentation_entry->second.connections) {
       connection->OnTerminated();
     }
     presentations_by_id_.erase(presentation_entry);

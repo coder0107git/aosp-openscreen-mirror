@@ -26,6 +26,7 @@
 #include "platform/api/time.h"
 #include "platform/base/ip_address.h"
 #include "util/alarm.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::osp {
 
@@ -55,8 +56,9 @@ class QuicServiceBase : public QuicConnection::Delegate,
   void OnIncomingStream(uint64_t instance_id, QuicStream* stream) override;
   void OnConnectionClosed(std::string_view instance_name) override;
   QuicStream::Delegate& GetStreamDelegate(uint64_t instance_id) override;
-  void OnClientCertificates(std::string_view instance_name,
-                            const std::vector<std::string>& certs) override;
+  void OnClientCertificates(
+      std::string_view instance_name,
+      const std::vector<std::string_view>& certs) override;
 
   // QuicStreamManager::Delegate overrides.
   void OnDataReceived(uint64_t instance_id,
@@ -152,8 +154,8 @@ class QuicServiceBase : public QuicConnection::Delegate,
   std::map<std::string, std::unique_ptr<Alarm>> cleanup_alarms_;
 
   const ClockNowFunctionPtr now_function_;
-  TaskRunner& task_runner_;
-  ProtocolConnectionServiceObserver& observer_;
+  const raw_ref<TaskRunner> task_runner_;
+  const raw_ref<ProtocolConnectionServiceObserver> observer_;
 };
 
 }  // namespace openscreen::osp

@@ -5,26 +5,32 @@
 #ifndef CAST_STREAMING_PUBLIC_SENDER_SESSION_H_
 #define CAST_STREAMING_PUBLIC_SENDER_SESSION_H_
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "cast/common/public/message_port.h"
 #include "cast/streaming/capture_configs.h"
-#include "cast/streaming/impl/session_config.h"
 #include "cast/streaming/impl/statistics_analyzer.h"
+#include "cast/streaming/input.pb.h"
 #include "cast/streaming/public/answer_messages.h"
 #include "cast/streaming/public/capture_recommendations.h"
-#include "cast/streaming/public/offer_messages.h"
+#include "cast/streaming/public/protobuf_messenger.h"
 #include "cast/streaming/public/rpc_messenger.h"
 #include "cast/streaming/public/sender.h"
+#include "cast/streaming/public/session_config.h"
 #include "cast/streaming/public/session_messenger.h"
 #include "cast/streaming/public/statistics.h"
 #include "cast/streaming/remoting_capabilities.h"
 #include "cast/streaming/sender_packet_router.h"
 #include "json/value.h"
+#include "platform/base/ip_address.h"
 #include "util/json/json_serialization.h"
+#include "util/raw_ptr.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::cast {
 
@@ -108,10 +114,10 @@ class SenderSession final {
 
     // The cast environment used to access operating system resources, such
     // as the UDP socket for RTP/RTCP messaging. Required.
-    Environment* environment;
+    raw_ptr<Environment> environment;
 
     // The message port used to send streaming control protocol messages.
-    MessagePort* message_port;
+    raw_ptr<MessagePort> message_port;
 
     // The message source identifier (e.g. this sender).
     std::string message_source_id;
@@ -123,6 +129,20 @@ class SenderSession final {
     // Whether or not the android RTP value hack should be used (for legacy
     // android devices). For more information, see https://crbug.com/631828.
     bool use_android_rtp_hack = true;
+
+    // If true, allows the sender to negotiate DSCP marking for RTP and RTCP
+    // packets, which can help provide Quality-of-Service in some
+    // environments. This feature is off by default to allow embedders to opt
+    // in and experiment as desired.
+    bool enable_dscp = false;
+
+    // Optional override for the UDP socket receive buffer size.
+    // If set to > 0, sets SO_RCVBUF on the socket.
+    std::optional<size_t> udp_receive_buffer_size;
+
+    // Optional override for the UDP socket send buffer size.
+    // If set to > 0, sets SO_SNDBUF on the socket.
+    std::optional<size_t> udp_send_buffer_size;
   };
 
   // The SenderSession assumes that the passed in client, environment, and
@@ -166,6 +186,16 @@ class SenderSession final {
   // Set the client for handling statistics events. Statistics will not be
   // recorded unless this field is set.
   void SetStatsClient(SenderStatsClient* client);
+
+  // Set the callback for handling input events. If set, future negotiations
+  // will include support for input events. If not set, the sender will not
+  // request input messaging with the receiver.
+  // NOTE: resetting the callback to null will not force a renegotiation -- the
+  // embedder is responsible for deciding what happens next with the session.
+  void SetInputCallback(std::function<void(InputMessage)> callback);
+
+  // Sends an input message to the remote.
+  void SendInputMessage(const InputMessage& message);
 
   // The RPC messenger for this session. NOTE: RPC messages may come at
   // any time from the receiver, so subscriptions to RPC remoting messages
@@ -223,6 +253,7 @@ class SenderSession final {
   void OnAnswer(ErrorOr<ReceiverMessage> message);
   void OnCapabilitiesResponse(ErrorOr<ReceiverMessage> message);
   void OnRpcMessage(ErrorOr<ReceiverMessage> message);
+  void OnInputMessage(ErrorOr<ReceiverMessage> message);
 
   // Handles an error `message` response from a receiver. If the receiver does
   // not contain any error information, `default_error` will be reported
@@ -247,20 +278,21 @@ class SenderSession final {
   // Spawn a set of configured senders from the currently stored negotiation.
   ConfiguredSenders SelectSenders(const Answer& answer);
 
-  // Used by the RPC messenger to send outbound messages.
-  void SendRpcMessage(std::vector<uint8_t> message_body);
-
   // This session's configuration.
   Configuration config_;
 
   // The session messenger, which uses the message port for sending control
-  // messages. For message formats, see
-  // cast/protocol/castv2/streaming_schema.json.
+  // messages. For message formats, see the OFFER/ANSWER message definitions in
+  // cast/streaming/public/offer_messages.h and answer_messages.h.
   SenderSessionMessenger messenger_;
 
-  // The RPC messenger, which uses the session messager for sending RPC messages
-  // and handles subscriptions to RPC messages.
+  // The RPC messenger, which uses the session messenger for sending RPC
+  // messages and handles subscriptions to RPC messages.
   RpcMessenger rpc_messenger_;
+
+  // The INPUT messenger, which uses the session messenger for sending INPUT
+  // messages.
+  ProtobufMessenger<InputMessage> input_messenger_;
 
   // The packet router used for RTP/RTCP messaging across all senders.
   SenderPacketRouter packet_router_;
@@ -285,7 +317,7 @@ class SenderSession final {
 
   // The statistics client for this session. Must be set in order for statistics
   // to be calculated.
-  SenderStatsClient* stats_client_ = nullptr;
+  raw_ptr<SenderStatsClient> stats_client_ = nullptr;
 };  // namespace cast
 
 }  // namespace openscreen::cast

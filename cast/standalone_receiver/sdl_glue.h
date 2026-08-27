@@ -52,9 +52,9 @@ class ScopedSDLSubSystem {
         SDL_Create##name(std::forward<Args>(args)...));      \
   }
 
-DEFINE_SDL_UNIQUE_PTR(Window);
-DEFINE_SDL_UNIQUE_PTR(Renderer);
-DEFINE_SDL_UNIQUE_PTR(Texture);
+DEFINE_SDL_UNIQUE_PTR(Window)
+DEFINE_SDL_UNIQUE_PTR(Renderer)
+DEFINE_SDL_UNIQUE_PTR(Texture)
 
 #undef DEFINE_SDL_UNIQUE_PTR
 
@@ -71,12 +71,17 @@ class SDLEventLoopProcessor {
   using KeyboardEventCallback = std::function<void(const SDL_KeyboardEvent&)>;
   void RegisterForKeyboardEvent(KeyboardEventCallback cb);
 
+  using MouseButtonEventCallback =
+      std::function<void(const SDL_MouseButtonEvent&)>;
+  void RegisterForMouseButtonEvent(MouseButtonEventCallback cb);
+
  private:
   void ProcessPendingEvents();
 
   Alarm alarm_;
   std::function<void()> quit_callback_;
   std::vector<KeyboardEventCallback> keyboard_callbacks_;
+  std::vector<MouseButtonEventCallback> mouse_button_callbacks_;
 };
 
 }  // namespace cast

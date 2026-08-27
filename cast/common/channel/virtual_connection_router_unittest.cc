@@ -14,6 +14,7 @@
 #include "cast/common/channel/testing/mock_socket_error_handler.h"
 #include "cast/common/public/cast_socket.h"
 #include "gtest/gtest.h"
+#include "util/raw_ptr.h"
 
 namespace openscreen::cast {
 namespace {
@@ -33,7 +34,6 @@ static_assert(proto::CastMessage_ProtocolVersion_CASTV2_1_3 ==
 
 using proto::CastMessage;
 using ::testing::_;
-using ::testing::Invoke;
 using ::testing::SaveArg;
 using ::testing::WithArg;
 
@@ -50,14 +50,14 @@ class VirtualConnectionRouterTest : public ::testing::Test {
   }
 
  protected:
-  FakeCastSocketPair fake_cast_socket_pair_;
-  CastSocket* local_socket_;
-  CastSocket* remote_socket_;
-
   MockSocketErrorHandler mock_error_handler_;
 
   VirtualConnectionRouter local_router_;
   VirtualConnectionRouter remote_router_;
+
+  FakeCastSocketPair fake_cast_socket_pair_;
+  raw_ptr<CastSocket> local_socket_;
+  raw_ptr<CastSocket> remote_socket_;
 
   VirtualConnection vc1_{"local1", "peer1", 75};
   VirtualConnection vc2_{"local2", "peer2", 76};
@@ -173,10 +173,10 @@ TEST_F(VirtualConnectionRouterTest, LocalIdHandler) {
   message.set_destination_id("receiver-1234");
   message.set_payload_type(CastMessage::STRING);
   message.set_payload_utf8("cnlybnq");
-  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_, _));
+  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_.get(), _));
   EXPECT_TRUE(remote_socket_->Send(message).ok());
 
-  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_, _));
+  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_.get(), _));
   EXPECT_TRUE(remote_socket_->Send(message).ok());
 
   message.set_destination_id("receiver-4321");
@@ -200,12 +200,13 @@ TEST_F(VirtualConnectionRouterTest, RemoveLocalIdHandler) {
   message.set_destination_id("receiver-1234");
   message.set_payload_type(CastMessage::STRING);
   message.set_payload_utf8("cnlybnq");
-  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_, _));
+  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_.get(), _));
   EXPECT_TRUE(remote_socket_->Send(message).ok());
 
   local_router_.RemoveHandlerForLocalId("receiver-1234");
 
-  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_, _)).Times(0);
+  EXPECT_CALL(mock_message_handler, OnMessage(_, local_socket_.get(), _))
+      .Times(0);
   EXPECT_TRUE(remote_socket_->Send(message).ok());
 
   local_router_.RemoveHandlerForLocalId("receiver-1234");
@@ -231,13 +232,12 @@ TEST_F(VirtualConnectionRouterTest, SendMessage) {
   message.set_payload_utf8("cnlybnq");
   ASSERT_TRUE(message.IsInitialized());
 
-  EXPECT_CALL(destination, OnMessage(&remote_router_, remote_socket_, _))
-      .WillOnce(
-          WithArg<2>(Invoke([&message](CastMessage message_at_destination) {
-            ASSERT_TRUE(message_at_destination.IsInitialized());
-            EXPECT_EQ(message.SerializeAsString(),
-                      message_at_destination.SerializeAsString());
-          })));
+  EXPECT_CALL(destination, OnMessage(&remote_router_, remote_socket_.get(), _))
+      .WillOnce(WithArg<2>([&message](CastMessage message_at_destination) {
+        ASSERT_TRUE(message_at_destination.IsInitialized());
+        EXPECT_EQ(message.SerializeAsString(),
+                  message_at_destination.SerializeAsString());
+      }));
   local_router_.Send(VirtualConnection{"receiver-1234", "sender-4321",
                                        local_socket_->socket_id()},
                      message);
@@ -248,9 +248,10 @@ TEST_F(VirtualConnectionRouterTest, CloseSocketRemovesVirtualConnections) {
                                                 local_socket_->socket_id()},
                               {});
 
-  EXPECT_CALL(mock_error_handler_, OnClose(local_socket_)).Times(1);
+  EXPECT_CALL(mock_error_handler_, OnClose(local_socket_.get())).Times(1);
 
   int id = local_socket_->socket_id();
+  local_socket_ = nullptr;
   local_router_.CloseSocket(id);
   EXPECT_FALSE(local_router_.GetConnectionData(
       VirtualConnection{"receiver-1234", "sender-4321", id}));
@@ -289,13 +290,13 @@ TEST_F(VirtualConnectionRouterTest, BroadcastsFromLocalSource) {
   EXPECT_CALL(bob, OnMessage(&local_router_, nullptr, _))
       .WillOnce(SaveArg<2>(&message_bob_got))
       .RetiresOnSaturation();
-  EXPECT_CALL(charlie, OnMessage(&remote_router_, remote_socket_, _))
+  EXPECT_CALL(charlie, OnMessage(&remote_router_, remote_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_charlie_got))
       .RetiresOnSaturation();
-  EXPECT_CALL(dave, OnMessage(&remote_router_, remote_socket_, _))
+  EXPECT_CALL(dave, OnMessage(&remote_router_, remote_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_dave_got))
       .RetiresOnSaturation();
-  EXPECT_CALL(eve, OnMessage(&remote_router_, remote_socket_, _))
+  EXPECT_CALL(eve, OnMessage(&remote_router_, remote_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_eve_got))
       .RetiresOnSaturation();
   ASSERT_TRUE(local_router_.BroadcastFromLocalPeer("wendy", message).ok());
@@ -323,8 +324,10 @@ TEST_F(VirtualConnectionRouterTest, BroadcastsFromLocalSource) {
   EXPECT_CALL(alice, OnMessage(&local_router_, nullptr, _)).Times(1);
   EXPECT_CALL(bob, OnMessage(_, _, _)).Times(0);
   EXPECT_CALL(charlie, OnMessage(_, _, _)).Times(0);
-  EXPECT_CALL(dave, OnMessage(&remote_router_, remote_socket_, _)).Times(1);
-  EXPECT_CALL(eve, OnMessage(&remote_router_, remote_socket_, _)).Times(1);
+  EXPECT_CALL(dave, OnMessage(&remote_router_, remote_socket_.get(), _))
+      .Times(1);
+  EXPECT_CALL(eve, OnMessage(&remote_router_, remote_socket_.get(), _))
+      .Times(1);
   ASSERT_TRUE(local_router_.BroadcastFromLocalPeer("wendy", message).ok());
 }
 
@@ -349,13 +352,13 @@ TEST_F(VirtualConnectionRouterTest, BroadcastsFromRemoteSource) {
   message.set_payload_utf8("cnlybnq");
 
   CastMessage message_alice_got, message_bob_got, message_charlie_got;
-  EXPECT_CALL(alice, OnMessage(&local_router_, local_socket_, _))
+  EXPECT_CALL(alice, OnMessage(&local_router_, local_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_alice_got))
       .RetiresOnSaturation();
-  EXPECT_CALL(bob, OnMessage(&local_router_, local_socket_, _))
+  EXPECT_CALL(bob, OnMessage(&local_router_, local_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_bob_got))
       .RetiresOnSaturation();
-  EXPECT_CALL(charlie, OnMessage(&local_router_, local_socket_, _))
+  EXPECT_CALL(charlie, OnMessage(&local_router_, local_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_charlie_got))
       .RetiresOnSaturation();
   ASSERT_TRUE(remote_router_.BroadcastFromLocalPeer("wendy", message).ok());
@@ -375,9 +378,11 @@ TEST_F(VirtualConnectionRouterTest, BroadcastsFromRemoteSource) {
   // Remove one local peer, and confirm only the two remaining local peers
   // receive a broadcast message from the remote source.
   local_router_.RemoveHandlerForLocalId("bob");
-  EXPECT_CALL(alice, OnMessage(&local_router_, local_socket_, _)).Times(1);
+  EXPECT_CALL(alice, OnMessage(&local_router_, local_socket_.get(), _))
+      .Times(1);
   EXPECT_CALL(bob, OnMessage(_, _, _)).Times(0);
-  EXPECT_CALL(charlie, OnMessage(&local_router_, local_socket_, _)).Times(1);
+  EXPECT_CALL(charlie, OnMessage(&local_router_, local_socket_.get(), _))
+      .Times(1);
   ASSERT_TRUE(remote_router_.BroadcastFromLocalPeer("wendy", message).ok());
 }
 
@@ -415,7 +420,8 @@ TEST_F(VirtualConnectionRouterTest, HandlesConnectionMessagesAsSpecialCase) {
   message.set_namespace_(kConnectionNamespace);
 
   CastMessage message_received;
-  EXPECT_CALL(connection_handler, OnMessage(&local_router_, local_socket_, _))
+  EXPECT_CALL(connection_handler,
+              OnMessage(&local_router_, local_socket_.get(), _))
       .WillOnce(SaveArg<2>(&message_received))
       .RetiresOnSaturation();
   EXPECT_CALL(alice, OnMessage(_, _, _)).Times(0);

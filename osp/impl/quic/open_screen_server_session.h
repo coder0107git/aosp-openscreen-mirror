@@ -11,6 +11,7 @@
 
 #include "osp/impl/quic/open_screen_session_base.h"
 #include "quiche/quic/core/tls_server_handshaker.h"
+#include "util/raw_ref.h"
 
 namespace openscreen::osp {
 
@@ -30,7 +31,7 @@ class TlsServerHandshakerImpl final : public quic::TlsServerHandshaker {
   // This will propagate client certificate to QuicServer and the certificate is
   // used in authentication.
   quic::QuicAsyncStatus VerifyCertChain(
-      const std::vector<std::string>& certs,
+      const std::vector<std::string_view>& certs,
       std::string* error_details,
       std::unique_ptr<quic::ProofVerifyDetails>* details,
       uint8_t* out_alert,
@@ -61,7 +62,7 @@ class OpenScreenServerSession : public OpenScreenSessionBase {
   std::unique_ptr<quic::QuicCryptoStream> CreateCryptoStream() override;
 
  private:
-  const quic::QuicCryptoServerConfig& crypto_server_config_;
+  const raw_ref<const quic::QuicCryptoServerConfig> crypto_server_config_;
 };
 
 }  // namespace openscreen::osp

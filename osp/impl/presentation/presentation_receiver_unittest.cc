@@ -27,42 +27,50 @@ namespace openscreen::osp {
 namespace {
 
 using ::testing::_;
-using ::testing::Invoke;
 using ::testing::NiceMock;
 
 class MockConnectRequestCallback final : public ConnectRequestCallback {
  public:
   ~MockConnectRequestCallback() override = default;
 
-  MOCK_METHOD3(OnConnectSucceed,
-               void(uint64_t request_id,
-                    std::string_view instance_name,
-                    uint64_t instance_id));
-  MOCK_METHOD2(OnConnectFailed,
-               void(uint64_t request_id, std::string_view instance_name));
+  MOCK_METHOD(void,
+              OnConnectSucceed,
+              (uint64_t request_id,
+               std::string_view instance_name,
+               uint64_t instance_id),
+              (override));
+  MOCK_METHOD(void,
+              OnConnectFailed,
+              (uint64_t request_id, std::string_view instance_name),
+              (override));
 };
 
 class MockReceiverDelegate final : public ReceiverDelegate {
  public:
   ~MockReceiverDelegate() override = default;
 
-  MOCK_METHOD3(
-      OnUrlAvailabilityRequest,
-      std::vector<msgs::UrlAvailability>(uint64_t watch_id,
-                                         uint64_t watch_duration,
-                                         std::vector<std::string> urls));
-  MOCK_METHOD3(StartPresentation,
-               bool(const Connection::PresentationInfo& info,
-                    uint64_t source_id,
-                    const std::vector<msgs::HttpHeader>& http_headers));
-  MOCK_METHOD3(ConnectToPresentation,
-               bool(uint64_t request_id,
-                    const std::string& id,
-                    uint64_t source_id));
-  MOCK_METHOD3(TerminatePresentation,
-               void(const std::string& id,
-                    TerminationSource source,
-                    TerminationReason reason));
+  MOCK_METHOD(std::vector<msgs::UrlAvailability>,
+              OnUrlAvailabilityRequest,
+              (uint64_t watch_id,
+               uint64_t watch_duration,
+               std::vector<std::string> urls),
+              (override));
+  MOCK_METHOD(bool,
+              StartPresentation,
+              (const Connection::PresentationInfo& info,
+               uint64_t source_id,
+               const std::vector<msgs::HttpHeader>& http_headers),
+              (override));
+  MOCK_METHOD(bool,
+              ConnectToPresentation,
+              (uint64_t request_id, const std::string& id, uint64_t source_id),
+              (override));
+  MOCK_METHOD(void,
+              TerminatePresentation,
+              (const std::string& id,
+               TerminationSource source,
+               TerminationReason reason),
+              (override));
 };
 
 class PresentationReceiverTest : public ::testing::Test {
@@ -92,15 +100,13 @@ class PresentationReceiverTest : public ::testing::Test {
   void SetUp() override {
     quic_bridge_.CreateNetworkServiceManager(nullptr, nullptr);
     ON_CALL(quic_bridge_.mock_server_observer(), OnIncomingConnectionMock(_))
-        .WillByDefault(
-            Invoke([this](std::unique_ptr<ProtocolConnection>& connection) {
-              server_connections_.push_back(std::move(connection));
-            }));
+        .WillByDefault([this](std::unique_ptr<ProtocolConnection>& connection) {
+          server_connections_.push_back(std::move(connection));
+        });
     ON_CALL(quic_bridge_.mock_client_observer(), OnIncomingConnectionMock(_))
-        .WillByDefault(
-            Invoke([this](std::unique_ptr<ProtocolConnection>& connection) {
-              client_connections_.push_back(std::move(connection));
-            }));
+        .WillByDefault([this](std::unique_ptr<ProtocolConnection>& connection) {
+          client_connections_.push_back(std::move(connection));
+        });
     receiver_.Init();
     receiver_.SetReceiverDelegate(&mock_receiver_delegate_);
   }
@@ -142,24 +148,24 @@ TEST_F(PresentationReceiverTest, QueryAvailability) {
   stream->Write(ByteView(buffer.data(), buffer.size()));
 
   EXPECT_CALL(mock_receiver_delegate_, OnUrlAvailabilityRequest(_, _, _))
-      .WillOnce(Invoke([this](uint64_t watch_id, uint64_t watch_duration,
-                              std::vector<std::string> urls) {
+      .WillOnce([this](uint64_t watch_id, uint64_t watch_duration,
+                       std::vector<std::string> urls) {
         EXPECT_EQ(std::vector<std::string>{url1_}, urls);
 
         return std::vector<msgs::UrlAvailability>{
             msgs::UrlAvailability::kAvailable};
-      }));
+      });
 
   msgs::PresentationUrlAvailabilityResponse response;
   EXPECT_CALL(mock_callback, OnStreamMessage(_, _, _, _, _, _))
-      .WillOnce(Invoke([&response](uint64_t instance_id, uint64_t cid,
-                                   msgs::Type message_type, const uint8_t* buf,
-                                   size_t buffer_size, Clock::time_point now) {
+      .WillOnce([&response](uint64_t instance_id, uint64_t cid,
+                            msgs::Type message_type, const uint8_t* buf,
+                            size_t buffer_size, Clock::time_point now) {
         const msgs::CborResult result =
             msgs::DecodePresentationUrlAvailabilityResponse(buf, buffer_size,
                                                             response);
         return result;
-      }));
+      });
   quic_bridge_.RunTasksUntilIdle();
   EXPECT_EQ(request.request_id, response.request_id);
   EXPECT_EQ(
@@ -200,13 +206,13 @@ TEST_F(PresentationReceiverTest, StartPresentation) {
                                   ResponseResult::kSuccess);
   msgs::PresentationStartResponse response;
   EXPECT_CALL(mock_callback, OnStreamMessage(_, _, _, _, _, _))
-      .WillOnce(Invoke([&response](uint64_t instance_id, uint64_t cid,
-                                   msgs::Type message_type, const uint8_t* buf,
-                                   size_t buf_size, Clock::time_point now) {
+      .WillOnce([&response](uint64_t instance_id, uint64_t cid,
+                            msgs::Type message_type, const uint8_t* buf,
+                            size_t buf_size, Clock::time_point now) {
         const msgs::CborResult result =
             msgs::DecodePresentationStartResponse(buf, buf_size, response);
         return result;
-      }));
+      });
   quic_bridge_.RunTasksUntilIdle();
   EXPECT_EQ(msgs::Result::kSuccess, response.result);
   EXPECT_EQ(connection.connection_id(), response.connection_id);

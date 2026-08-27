@@ -20,14 +20,14 @@ namespace {
 
 class MockNetworkWaiter final : public SocketHandleWaiter {
  public:
-  using ReadyHandle = SocketHandleWaiter::ReadyHandle;
+  using HandleWithFlags = SocketHandleWaiter::HandleWithFlags;
 
   MockNetworkWaiter() : SocketHandleWaiter(&FakeClock::now) {}
 
-  MOCK_METHOD2(
-      AwaitSocketsReadable,
-      ErrorOr<std::vector<ReadyHandle>>(const std::vector<SocketHandleRef>&,
-                                        const Clock::duration&));
+  MOCK_METHOD(ErrorOr<std::vector<HandleWithFlags>>,
+              AwaitSocketsReady,
+              (const std::vector<HandleWithFlags>&, const Clock::duration&),
+              (override));
 };
 
 class MockSocket : public StreamSocketPosix {
@@ -60,7 +60,7 @@ class TestingDataRouter : public TlsDataRouterPosix {
   using TlsDataRouterPosix::IsSocketWatched;
 
   bool AnySocketsWatched() {
-    std::unique_lock<std::mutex> lock(accept_socket_mutex_);
+    std::lock_guard<std::mutex> lock(accept_socket_mutex_);
     return !accept_stream_sockets_.empty() && !accept_socket_mappings_.empty();
   }
 };
@@ -130,7 +130,7 @@ TEST_F(TlsNetworkingManagerPosixTest, CallsReadySocket) {
   EXPECT_CALL(connection3, SendAvailableBytes()).Times(0);
   EXPECT_CALL(connection3, TryReceiveMessage()).Times(0);
   network_manager()->ProcessReadyHandle(connection2.socket_handle(),
-                                        SocketHandleWaiter::Flags::kWriteable);
+                                        SocketHandleWaiter::Flags::kWritable);
 }
 
 TEST_F(TlsNetworkingManagerPosixTest, DeregisterTlsConnection) {

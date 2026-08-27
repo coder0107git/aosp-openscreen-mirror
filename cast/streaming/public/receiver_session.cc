@@ -6,13 +6,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "cast/common/channel/message_util.h"
 #include "cast/common/public/message_port.h"
+#include "cast/streaming/impl/message_constants.h"
+#include "cast/streaming/impl/receiver_impl.h"
 #include "cast/streaming/message_fields.h"
 #include "cast/streaming/public/answer_messages.h"
+#include "cast/streaming/public/constants.h"
 #include "cast/streaming/public/environment.h"
 #include "cast/streaming/public/offer_messages.h"
 #include "cast/streaming/public/receiver.h"
@@ -74,6 +79,18 @@ MediaCapability ToCapability(VideoCodec codec) {
   }
 }
 
+void MaybeSetDscp(AudioStream* audio, VideoStream* video, Environment& env) {
+  std::optional<int> dscp_value;
+  if (audio) {
+    dscp_value = audio->stream.receiver_rtcp_dscp;
+  } else if (video) {
+    dscp_value = video->stream.receiver_rtcp_dscp;
+  }
+  if (dscp_value) {
+    env.SetDscp(static_cast<UdpSocket::DscpMode>(dscp_value.value()));
+  }
+}
+
 }  // namespace
 
 ReceiverSession::Client::~Client() = default;
@@ -86,13 +103,23 @@ ReceiverSession::ReceiverSession(Client& client,
       environment_(environment),
       constraints_(std::move(constraints)),
       session_id_(MakeUniqueSessionId("streaming_receiver")),
-      messenger_(message_port,
-                 session_id_,
-                 [this](Error error) {
-                   OSP_DLOG_WARN << "Got a session messenger error: " << error;
-                   client_.OnError(this, error);
-                 }),
-      packet_router_(environment_) {
+      messenger_(std::make_unique<ReceiverSessionMessenger>(
+          message_port,
+          session_id_,
+          [this](Error error) {
+            OSP_DLOG_WARN << "Got a session messenger error: " << error;
+            client_->OnError(this, error);
+          })),
+      packet_router_(*environment_),
+      input_messenger_([this](std::vector<uint8_t> message) {
+        if (!negotiated_sender_id_.empty()) {
+          const Error error = this->messenger_->SendInputMessage(
+              negotiated_sender_id_, message);
+          if (!error.ok()) {
+            OSP_LOG_WARN << "Failed to send input message: " << error;
+          }
+        }
+      }) {
   OSP_CHECK(std::none_of(
       constraints_.video_codecs.begin(), constraints_.video_codecs.end(),
       [](VideoCodec c) { return c == VideoCodec::kNotSpecified; }));
@@ -100,26 +127,64 @@ ReceiverSession::ReceiverSession(Client& client,
       constraints_.audio_codecs.begin(), constraints_.audio_codecs.end(),
       [](AudioCodec c) { return c == AudioCodec::kNotSpecified; }));
 
-  messenger_.SetHandler(
+  messenger_->SetHandler(
       SenderMessage::Type::kOffer,
       [this](const std::string& sender_id, SenderMessage message) {
         OnOffer(sender_id, std::move(message));
       });
-  messenger_.SetHandler(
+  messenger_->SetHandler(
       SenderMessage::Type::kGetCapabilities,
       [this](const std::string& sender_id, SenderMessage message) {
         OnCapabilitiesRequest(sender_id, std::move(message));
       });
-  messenger_.SetHandler(
+  messenger_->SetHandler(
       SenderMessage::Type::kRpc,
       [this](const std::string& sender_id, SenderMessage message) {
         this->OnRpcMessage(sender_id, std::move(message));
       });
-  environment_.SetSocketSubscriber(this);
+  messenger_->SetHandler(
+      SenderMessage::Type::kInput,
+      [this](const std::string& sender_id, SenderMessage message) {
+        this->OnInputMessage(sender_id, std::move(message));
+      });
+  environment_->SetSocketSubscriber(this);
 }
 
 ReceiverSession::~ReceiverSession() {
+  environment_->SetSocketSubscriber(nullptr);
+  // messenger_ must be destroyed before OnReceiversDestroying runs, since it
+  // calls message_port_.ResetClient(). That MessagePort is destroyed before
+  // OnReceiversDestroying returns. See crbug.com/374199735 for more details.
+  messenger_.reset();
   ResetReceivers(Client::kEndOfSession);
+}
+
+void ReceiverSession::SetInputCallback(
+    std::function<void(InputMessage)> callback) {
+  if (callback) {
+    input_messenger_.SetReceiveMessageCallback(
+        [cb = std::move(callback)](std::unique_ptr<InputMessage> message) {
+          cb(std::move(*message));
+        });
+  } else {
+    input_messenger_.SetReceiveMessageCallback(nullptr);
+  }
+}
+
+void ReceiverSession::SetCustomMessageHandler(
+    std::string_view message_namespace,
+    ReceiverSessionMessenger::CustomMessageCallback cb) {
+  messenger_->SetCustomMessageHandler(message_namespace, std::move(cb));
+}
+
+void ReceiverSession::SendInputMessage(const InputMessage& message) {
+  if (negotiated_sender_id_.empty()) {
+    OSP_DLOG_WARN << "Can't send an INPUT message without a currently "
+                     "negotiated session.";
+    return;
+  }
+
+  input_messenger_.SendMessageToRemote(message);
 }
 
 void ReceiverSession::OnSocketReady() {
@@ -136,9 +201,9 @@ void ReceiverSession::OnSocketInvalid(const Error& error) {
     pending_offer_.reset();
   }
 
-  client_.OnError(this,
-                  Error(Error::Code::kSocketFailure,
-                        "The environment is invalid and should be replaced."));
+  client_->OnError(this,
+                   Error(Error::Code::kSocketFailure,
+                         "The environment is invalid and should be replaced."));
 }
 
 bool ReceiverSession::PendingOffer::IsValid() const {
@@ -161,7 +226,7 @@ void ReceiverSession::OnOffer(const std::string& sender_id,
     const Error error(Error::Code::kParameterInvalid,
                       "Failed to parse malformed OFFER");
     SendErrorAnswerReply(sender_id, message.sequence_number, error);
-    client_.OnError(this, error);
+    client_->OnError(this, error);
     return;
   }
 
@@ -169,7 +234,7 @@ void ReceiverSession::OnOffer(const std::string& sender_id,
   properties->sender_id = sender_id;
   properties->sequence_number = message.sequence_number;
 
-  const Offer& offer = absl::get<Offer>(message.body);
+  const Offer& offer = std::get<Offer>(message.body);
 
   if (offer.cast_mode == CastMode::kRemoting) {
     if (!constraints_.remoting) {
@@ -201,7 +266,7 @@ void ReceiverSession::OnOffer(const std::string& sender_id,
     pending_offer_.reset();
   }
 
-  switch (environment_.socket_state()) {
+  switch (environment_->socket_state()) {
     // If the environment is ready or in a bad state, we can respond
     // immediately.
     case Environment::SocketState::kInvalid:
@@ -245,9 +310,9 @@ void ReceiverSession::OnCapabilitiesRequest(const std::string& sender_id,
 
   // NOTE: we respond to any arbitrary sender here, to allow sender to get
   // capabilities before making an OFFER.
-  const Error result = messenger_.SendMessage(sender_id, std::move(response));
+  const Error result = messenger_->SendMessage(sender_id, std::move(response));
   if (!result.ok()) {
-    client_.OnError(this, result);
+    client_->OnError(this, result);
   }
 }
 
@@ -265,45 +330,45 @@ void ReceiverSession::OnRpcMessage(const std::string& sender_id,
     return;
   }
 
-  const auto& body = absl::get<std::vector<uint8_t>>(message.body);
+  const auto& body = std::get<std::vector<uint8_t>>(message.body);
   if (!rpc_messenger_) {
     OSP_DLOG_INFO << "Received an RPC message without having a messenger.";
     return;
   }
-  rpc_messenger_->ProcessMessageFromRemote(body.data(), body.size());
+  rpc_messenger_->ProcessMessageFromRemote(body);
 }
 
-void ReceiverSession::SendRpcMessage(std::vector<uint8_t> message) {
-  if (negotiated_sender_id_.empty()) {
-    OSP_DLOG_WARN
-        << "Can't send an RPC message without a currently negotiated session.";
+void ReceiverSession::OnInputMessage(const std::string& sender_id,
+                                     SenderMessage message) {
+  if (!message.valid) {
+    OSP_DLOG_WARN << "Bad INPUT message. This may or may not represent a "
+                     "serious problem.";
     return;
   }
 
-  const Error error = messenger_.SendMessage(
-      negotiated_sender_id_,
-      ReceiverMessage{ReceiverMessage::Type::kRpc, -1, true /* valid */,
-                      std::move(message)});
-
-  if (!error.ok()) {
-    OSP_LOG_WARN << "Failed to send RPC message: " << error;
+  if (sender_id != negotiated_sender_id_) {
+    OSP_DLOG_INFO << "Received an INPUT message from sender " << sender_id
+                  << "--which we haven't negotiated with, dropping.";
+    return;
   }
+
+  const auto& body = std::get<std::vector<uint8_t>>(message.body);
+  input_messenger_.ProcessMessageFromRemote(body);
 }
 
 void ReceiverSession::SelectStreams(const Offer& offer,
                                     PendingOffer* properties) {
   if (offer.cast_mode == CastMode::kMirroring) {
     if (!offer.audio_streams.empty() && !constraints_.audio_codecs.empty()) {
-      properties->selected_audio =
-          SelectStream(constraints_.audio_codecs, client_, offer.audio_streams);
+      properties->selected_audio = SelectStream(constraints_.audio_codecs,
+                                                *client_, offer.audio_streams);
     }
     if (!offer.video_streams.empty() && !constraints_.video_codecs.empty()) {
-      properties->selected_video =
-          SelectStream(constraints_.video_codecs, client_, offer.video_streams);
+      properties->selected_video = SelectStream(constraints_.video_codecs,
+                                                *client_, offer.video_streams);
     }
   } else {
     OSP_CHECK(offer.cast_mode == CastMode::kRemoting);
-
     if (offer.audio_streams.size() == 1) {
       properties->selected_audio =
           std::make_unique<AudioStream>(offer.audio_streams[0]);
@@ -316,6 +381,12 @@ void ReceiverSession::SelectStreams(const Offer& offer,
 }
 
 void ReceiverSession::InitializeSession(const PendingOffer& properties) {
+  // Enable DSCP on the UDP socket, if enabled and offered by the sender.
+  if (constraints_.enable_dscp) {
+    MaybeSetDscp(properties.selected_audio.get(),
+                 properties.selected_video.get(), *environment_);
+  }
+
   Answer answer = ConstructAnswer(properties);
   if (!answer.IsValid()) {
     // If the answer message is invalid, there is no point in setting up a
@@ -326,42 +397,49 @@ void ReceiverSession::InitializeSession(const PendingOffer& properties) {
     return;
   }
 
-  // Only spawn receivers if we know we have a valid answer message.
-  ConfiguredReceivers receivers = SpawnReceivers(properties);
-  negotiated_sender_id_ = properties.sender_id;
-  if (properties.mode == CastMode::kMirroring) {
-    client_.OnNegotiated(this, std::move(receivers));
-  } else {
-    rpc_messenger_ =
-        std::make_unique<RpcMessenger>([this](std::vector<uint8_t> message) {
-          this->SendRpcMessage(std::move(message));
-        });
-    client_.OnRemotingNegotiated(
-        this, RemotingNegotiation{std::move(receivers), rpc_messenger_.get()});
-  }
-
-  const Error result = messenger_.SendMessage(
-      negotiated_sender_id_,
+  // Send the ANSWER before informing the client, in case we have an error, or
+  // the client happens to decide to send a message that depends on the ANSWER
+  // being sent.
+  const Error result = messenger_->SendMessage(
+      properties.sender_id,
       ReceiverMessage{ReceiverMessage::Type::kAnswer,
                       properties.sequence_number, true /* valid */,
                       std::move(answer)});
   if (!result.ok()) {
-    client_.OnError(this, result);
+    client_->OnError(this, result);
+  }
+
+  ConfiguredReceivers receivers = SpawnReceivers(properties);
+  negotiated_sender_id_ = properties.sender_id;
+
+  if (properties.mode == CastMode::kMirroring) {
+    client_->OnNegotiated(this, std::move(receivers));
+  } else {
+    rpc_messenger_ =
+        std::make_unique<RpcMessenger>([this](std::vector<uint8_t> message) {
+          const Error error = this->messenger_->SendRpcMessage(
+              this->negotiated_sender_id_, message);
+          if (!error.ok()) {
+            OSP_LOG_WARN << "Failed to send RPC message: " << error;
+          }
+        });
+    client_->OnRemotingNegotiated(
+        this, RemotingNegotiation{std::move(receivers), rpc_messenger_.get()});
   }
 }
 
 std::unique_ptr<Receiver> ReceiverSession::ConstructReceiver(
     const Stream& stream) {
   // Session config is currently only for mirroring.
-  SessionConfig config = {stream.ssrc,         stream.ssrc + 1,
-                          stream.rtp_timebase, stream.channels,
-                          stream.target_delay, stream.aes_key,
-                          stream.aes_iv_mask,  /* is_pli_enabled */ true};
+  SessionConfig config(stream.ssrc, stream.ssrc + 1, stream.rtp_timebase,
+                       stream.channels, stream.target_delay, stream.aes_key,
+                       stream.aes_iv_mask, /* is_pli_enabled */ true,
+                       StreamType::kUnknown, stream.receiver_rtcp_event_log);
   if (!config.IsValid()) {
     return nullptr;
   }
-  return std::make_unique<Receiver>(environment_, packet_router_,
-                                    std::move(config));
+  return std::make_unique<ReceiverImpl>(*environment_, packet_router_,
+                                        std::move(config));
 }
 
 ReceiverSession::ConfiguredReceivers ReceiverSession::SpawnReceivers(
@@ -395,15 +473,26 @@ ReceiverSession::ConfiguredReceivers ReceiverSession::SpawnReceivers(
                            properties.selected_video->stream.codec_parameter};
   }
 
+  bool input_enabled = false;
+  if (constraints_.supports_input_events) {
+    const auto* video = properties.selected_video.get();
+    if (video &&
+        Contains(video->stream.rtp_extensions, kInputEventsRtpExtension)) {
+      input_enabled = true;
+    }
+  }
+
   return ConfiguredReceivers{current_audio_receiver_.get(),
                              std::move(audio_config),
                              current_video_receiver_.get(),
-                             std::move(video_config), properties.sender_id};
+                             std::move(video_config),
+                             input_enabled,
+                             properties.sender_id};
 }
 
 void ReceiverSession::ResetReceivers(Client::ReceiversDestroyingReason reason) {
   if (current_video_receiver_ || current_audio_receiver_) {
-    client_.OnReceiversDestroying(this, reason);
+    client_->OnReceiversDestroying(this, reason);
     current_audio_receiver_.reset();
     current_video_receiver_.reset();
     rpc_messenger_.reset();
@@ -413,12 +502,21 @@ void ReceiverSession::ResetReceivers(Client::ReceiversDestroyingReason reason) {
 Answer ReceiverSession::ConstructAnswer(const PendingOffer& properties) {
   OSP_CHECK(properties.IsValid());
 
+  // NOTE: The stream_indexes are intended to be always audio first, video
+  // second. Related arrays, such as stream_ssrcs and rtp_extensions, are
+  // expected to follow the same ordering.
   std::vector<int> stream_indexes;
   std::vector<Ssrc> stream_ssrcs;
+  std::vector<int> stream_indexes_with_events;
   Constraints constraints;
   if (properties.selected_audio) {
     stream_indexes.push_back(properties.selected_audio->stream.index);
     stream_ssrcs.push_back(properties.selected_audio->stream.ssrc + 1);
+
+    if (properties.selected_audio->stream.receiver_rtcp_event_log) {
+      stream_indexes_with_events.push_back(
+          properties.selected_audio->stream.index);
+    }
 
     for (const auto& limit : constraints_.audio_limits) {
       if (limit.codec == properties.selected_audio->codec ||
@@ -433,9 +531,6 @@ Answer ReceiverSession::ConstructAnswer(const PendingOffer& properties) {
   }
 
   if (properties.selected_video) {
-    stream_indexes.push_back(properties.selected_video->stream.index);
-    stream_ssrcs.push_back(properties.selected_video->stream.ssrc + 1);
-
     for (const auto& limit : constraints_.video_limits) {
       if (limit.codec == properties.selected_video->codec ||
           limit.applies_to_all_codecs) {
@@ -464,9 +559,48 @@ Answer ReceiverSession::ConstructAnswer(const PendingOffer& properties) {
   if (constraints.IsValid()) {
     answer_constraints = std::move(constraints);
   }
-  return Answer{environment_.GetBoundLocalEndpoint().port,
-                std::move(stream_indexes), std::move(stream_ssrcs),
-                answer_constraints, std::move(display)};
+
+  std::vector<int> receiver_rtcp_dscp;
+  if (constraints_.enable_dscp) {
+    if (properties.selected_audio &&
+        properties.selected_audio->stream.receiver_rtcp_dscp) {
+      receiver_rtcp_dscp.push_back(properties.selected_audio->stream.index);
+    }
+    if (properties.selected_video &&
+        properties.selected_video->stream.receiver_rtcp_dscp) {
+      receiver_rtcp_dscp.push_back(properties.selected_video->stream.index);
+    }
+  }
+
+  if (properties.selected_video) {
+    stream_indexes.push_back(properties.selected_video->stream.index);
+    stream_ssrcs.push_back(properties.selected_video->stream.ssrc + 1);
+  }
+
+  std::vector<std::vector<std::string>> rtp_extensions;
+  if (constraints_.supports_input_events) {
+    const bool sender_requested_input_events =
+        properties.selected_video &&
+        Contains(properties.selected_video->stream.rtp_extensions,
+                 kInputEventsRtpExtension);
+
+    if (sender_requested_input_events) {
+      rtp_extensions.emplace_back();
+      rtp_extensions.push_back({kInputEventsRtpExtension});
+    }
+  }
+
+  return Answer{
+      .udp_port = environment_->GetBoundLocalEndpoint().port,
+      .send_indexes = std::move(stream_indexes),
+      .ssrcs = std::move(stream_ssrcs),
+      .constraints = answer_constraints,
+      .display = std::move(display),
+      .receiver_rtcp_event_log = std::move(stream_indexes_with_events),
+      .receiver_rtcp_dscp = receiver_rtcp_dscp,
+
+      // TODO(crbug.com/40238532): re-add support for adaptive playout delay??
+      .rtp_extensions = std::move(rtp_extensions)};
 }
 
 ReceiverCapability ReceiverSession::CreateRemotingCapabilityV2() {
@@ -496,12 +630,12 @@ void ReceiverSession::SendErrorAnswerReply(const std::string& sender_id,
                                            int sequence_number,
                                            const Error& error) {
   OSP_DLOG_WARN << error;
-  const Error result = messenger_.SendMessage(
+  const Error result = messenger_->SendMessage(
       sender_id,
       ReceiverMessage{ReceiverMessage::Type::kAnswer, sequence_number,
                       false /* valid */, ReceiverError(error)});
   if (!result.ok()) {
-    client_.OnError(this, result);
+    client_->OnError(this, result);
   }
 }
 

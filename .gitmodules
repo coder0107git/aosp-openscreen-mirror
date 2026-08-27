@@ -21,6 +21,10 @@
 	path = third_party/jsoncpp/src
 	url = https://chromium.googlesource.com/external/github.com/open-source-parsers/jsoncpp
 	gclient-condition = not build_with_chromium
+[submodule "third_party/pybind11/src"]
+	path = third_party/pybind11/src
+	url = https://github.com/pybind/pybind11
+	gclient-condition = not build_with_chromium
 [submodule "third_party/googletest/src"]
 	path = third_party/googletest/src
 	url = https://chromium.googlesource.com/external/github.com/google/googletest
@@ -64,11 +68,15 @@
 	path = third_party/modp_b64
 	url = https://chromium.googlesource.com/chromium/src/third_party/modp_b64
 	gclient-condition = not build_with_chromium
-[submodule "third_party/valijson/src"]
-	path = third_party/valijson/src
-	url = https://github.com/tristanpenman/valijson
-	gclient-condition = not build_with_chromium
 [submodule "third_party/googleurl/src"]
 	path = third_party/googleurl/src
 	url = https://quiche.googlesource.com/googleurl
+	gclient-condition = not build_with_chromium
+[submodule "third_party/perfetto/src"]
+	path = third_party/perfetto/src
+	url = https://chromium.googlesource.com/external/github.com/google/perfetto
+	gclient-condition = not build_with_chromium
+[submodule "third_party/rust"]
+	path = third_party/rust
+	url = https://chromium.googlesource.com/chromium/src/third_party/rust
 	gclient-condition = not build_with_chromium

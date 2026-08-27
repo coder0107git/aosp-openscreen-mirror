@@ -20,7 +20,7 @@ TlsServerHandshakerImpl::TlsServerHandshakerImpl(
 TlsServerHandshakerImpl::~TlsServerHandshakerImpl() = default;
 
 quic::QuicAsyncStatus TlsServerHandshakerImpl::VerifyCertChain(
-    const std::vector<std::string>& certs,
+    const std::vector<std::string_view>& certs,
     std::string* /*error_details*/,
     std::unique_ptr<quic::ProofVerifyDetails>* /*details*/,
     uint8_t* /*out_alert*/,
@@ -55,11 +55,8 @@ quic::QuicSSLConfig OpenScreenServerSession::GetSSLConfig() const {
 
 std::unique_ptr<quic::QuicCryptoStream>
 OpenScreenServerSession::CreateCryptoStream() {
-  OSP_CHECK_EQ(connection_->version().handshake_protocol,
-               quic::HandshakeProtocol::PROTOCOL_TLS1_3);
-
   return std::make_unique<TlsServerHandshakerImpl>(this,
-                                                   &crypto_server_config_);
+                                                   &*crypto_server_config_);
 }
 
 }  // namespace openscreen::osp

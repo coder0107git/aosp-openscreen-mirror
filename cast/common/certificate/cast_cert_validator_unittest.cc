@@ -12,9 +12,9 @@
 #include "cast/common/public/trust_store.h"
 #include "gtest/gtest.h"
 #include "openssl/pem.h"
-#include "platform/test/byte_view_test_util.h"
 #include "platform/test/paths.h"
 #include "util/crypto/pem_helpers.h"
+#include "util/no_destructor.h"
 
 namespace openscreen::cast {
 namespace {
@@ -89,10 +89,10 @@ void RunTest(Error::Code expected_result,
 
   // Test verification of some invalid signatures.
   EXPECT_FALSE(target_cert->VerifySignedData(
-      DigestAlgorithm::kSha256, ByteViewFromLiteral("bogus data"),
-      ByteViewFromLiteral("bogus signature")));
+      DigestAlgorithm::kSha256, ByteViewFromString("bogus data"),
+      ByteViewFromString("bogus signature")));
   EXPECT_FALSE(target_cert->VerifySignedData(
-      DigestAlgorithm::kSha256, ByteViewFromLiteral("bogus data"), ByteView()));
+      DigestAlgorithm::kSha256, ByteViewFromString("bogus data"), ByteView()));
   EXPECT_FALSE(target_cert->VerifySignedData(DigestAlgorithm::kSha256,
                                              ByteView(), ByteView()));
 
@@ -145,9 +145,9 @@ DateTime MarchFirst2037() {
 }
 
 const std::string& GetSpecificTestDataPath() {
-  static std::string data_path =
-      GetTestDataPath() + "/cast/common/certificate/";
-  return data_path;
+  static const NoDestructor<std::string> data_path(GetTestDataPath() +
+                                                   "/cast/common/certificate/");
+  return *data_path;
 }
 
 // Tests verifying a valid certificate chain of length 2:

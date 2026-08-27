@@ -10,7 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include "absl/types/variant.h"
 #include "cast/common/public/message_port.h"
 #include "cast/streaming/public/answer_messages.h"
 #include "cast/streaming/public/offer_messages.h"
@@ -20,6 +19,7 @@
 #include "platform/api/task_runner.h"
 #include "platform/base/span.h"
 #include "util/flat_map.h"
+#include "util/raw_ref.h"
 #include "util/weak_ptr.h"
 
 namespace openscreen::cast {
@@ -35,6 +35,8 @@ class SessionMessenger : public MessagePort::Client {
                    ErrorCallback cb);
   ~SessionMessenger() override;
 
+  MessagePort& message_port() { return *message_port_; }
+
  protected:
   // Barebones message sending method shared by both children.
   [[nodiscard]] Error SendMessage(const std::string& destination_id,
@@ -47,7 +49,7 @@ class SessionMessenger : public MessagePort::Client {
   const std::string& source_id() override { return source_id_; }
 
  private:
-  MessagePort& message_port_;
+  const raw_ref<MessagePort> message_port_;
   const std::string source_id_;
   ErrorCallback error_callback_;
 };
@@ -78,6 +80,9 @@ class SenderSessionMessenger final : public SessionMessenger {
   // Convenience method for sending a valid RPC message.
   [[nodiscard]] Error SendRpcMessage(ByteView message);
 
+  // Convenience method for sending a valid INPUT message.
+  [[nodiscard]] Error SendInputMessage(ByteView message);
+
   // Send a request (with optional reply callback).
   [[nodiscard]] Error SendRequest(SenderMessage message,
                                   ReceiverMessage::Type reply_type,
@@ -90,7 +95,7 @@ class SenderSessionMessenger final : public SessionMessenger {
   void OnError(const Error& error) override;
 
  private:
-  TaskRunner& task_runner_;
+  const raw_ref<TaskRunner> task_runner_;
 
   // This messenger should only be connected to one receiver, so `receiver_id_`
   // should not change.
@@ -104,6 +109,7 @@ class SenderSessionMessenger final : public SessionMessenger {
   // Currently we can only set a handler for RPC messages, so no need for
   // a flatmap here.
   ReplyCallback rpc_callback_;
+  ReplyCallback input_callback_;
 
   WeakPtrFactory<SenderSessionMessenger> weak_factory_{this};
 };
@@ -121,9 +127,29 @@ class ReceiverSessionMessenger final : public SessionMessenger {
   void SetHandler(SenderMessage::Type type, RequestCallback cb);
   void ResetHandler(SenderMessage::Type type);
 
+  // Convenience method for sending a valid RPC message.
+  [[nodiscard]] Error SendRpcMessage(const std::string& source_id,
+                                     ByteView message);
+
+  // Convenience method for sending a valid INPUT message.
+  [[nodiscard]] Error SendInputMessage(const std::string& source_id,
+                                       ByteView message);
+
   // Send a JSON message.
   [[nodiscard]] Error SendMessage(const std::string& source_id,
                                   ReceiverMessage message);
+
+  // Send a raw string message to a custom namespace.
+  [[nodiscard]] Error SendMessage(std::string_view destination_id,
+                                  std::string_view message_namespace,
+                                  std::string_view message);
+
+  using CustomMessageCallback =
+      std::function<void(const std::string& /* source_id */,
+                         const std::string& /* message_namespace */,
+                         const std::string& /* message */)>;
+  void SetCustomMessageHandler(std::string_view message_namespace,
+                               CustomMessageCallback cb);
 
   // MessagePort::Client overrides
   void OnMessage(const std::string& source_id,
@@ -133,6 +159,8 @@ class ReceiverSessionMessenger final : public SessionMessenger {
 
  private:
   FlatMap<SenderMessage::Type, RequestCallback> callbacks_;
+  std::vector<std::pair<std::string, CustomMessageCallback>>
+      custom_message_handlers_;
 };
 
 }  // namespace openscreen::cast

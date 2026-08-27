@@ -4,7 +4,9 @@
 
 #include "cast/streaming/public/receiver_message.h"
 
+#include <format>
 #include <utility>
+#include <variant>
 
 #include "cast/streaming/message_fields.h"
 #include "json/reader.h"
@@ -16,16 +18,16 @@
 #include "util/json/json_serialization.h"
 #include "util/osp_logging.h"
 #include "util/string_util.h"
-#include "util/stringprintf.h"
 
 namespace openscreen::cast {
 
 namespace {
 
-EnumNameTable<ReceiverMessage::Type, 3> kMessageTypeNames{
+EnumNameTable<ReceiverMessage::Type, 4> kMessageTypeNames{
     {{kMessageTypeAnswer, ReceiverMessage::Type::kAnswer},
      {"CAPABILITIES_RESPONSE", ReceiverMessage::Type::kCapabilitiesResponse},
-     {"RPC", ReceiverMessage::Type::kRpc}}};
+     {"RPC", ReceiverMessage::Type::kRpc},
+     {"INPUT", ReceiverMessage::Type::kInput}}};
 
 EnumNameTable<MediaCapability, 10> kMediaCapabilityNames{
     {{"audio", MediaCapability::kAudio},
@@ -44,7 +46,7 @@ ReceiverMessage::Type GetMessageType(const Json::Value& root) {
   if (!json::TryParseString(root[kMessageType], &type)) {
     return ReceiverMessage::Type::kUnknown;
   }
-  string_util::AsciiStrToUpper(type);
+  AsciiStrToUpper(type);
 
   ErrorOr<ReceiverMessage::Type> parsed = GetEnum(kMessageTypeNames, type);
   return parsed.value(ReceiverMessage::Type::kUnknown);
@@ -92,7 +94,7 @@ ReceiverError::~ReceiverError() = default;
 
 // static
 ErrorOr<ReceiverError> ReceiverError::Parse(const Json::Value& value) {
-  if (!value) {
+  if (!value.isObject()) {
     return Error(Error::Code::kParameterInvalid,
                  "Empty JSON in receiver error parsing");
   }
@@ -121,15 +123,15 @@ Error ReceiverError::ToError() const {
     return Error(*openscreen_code, description);
   }
 
-  std::string full_description = StringPrintf("Error code: %d, description: %s",
-                                              code, description.c_str());
+  std::string full_description =
+      std::format("Error code: {}, description: {}", code, description.c_str());
   return Error(Error::Code::kUnknownError, std::move(full_description));
 }
 
 // static
 ErrorOr<ReceiverCapability> ReceiverCapability::Parse(
     const Json::Value& value) {
-  if (!value) {
+  if (!value.isObject()) {
     return Error(Error::Code::kParameterInvalid,
                  "Empty JSON in capabilities parsing");
   }
@@ -163,7 +165,7 @@ Json::Value ReceiverCapability::ToJson() const {
 // static
 ErrorOr<ReceiverMessage> ReceiverMessage::Parse(const Json::Value& value) {
   ReceiverMessage message;
-  if (!value) {
+  if (!value.isObject()) {
     return Error(Error::Code::kJsonParseError, "Invalid message body");
   }
 
@@ -174,9 +176,11 @@ ErrorOr<ReceiverMessage> ReceiverMessage::Parse(const Json::Value& value) {
 
   message.type = GetMessageType(value);
   message.valid =
-      (result == kResultOk || message.type == ReceiverMessage::Type::kRpc);
+      (result == kResultOk || message.type == ReceiverMessage::Type::kRpc ||
+       message.type == ReceiverMessage::Type::kInput);
 
-  if (message.type != ReceiverMessage::Type::kRpc) {
+  if (message.type != ReceiverMessage::Type::kRpc &&
+      message.type != ReceiverMessage::Type::kInput) {
     if (!json::TryParseInt(value[kSequenceNumber],
                            &(message.sequence_number))) {
       message.sequence_number = -1;
@@ -199,10 +203,10 @@ ErrorOr<ReceiverMessage> ReceiverMessage::Parse(const Json::Value& value) {
 
   switch (message.type) {
     case Type::kAnswer: {
-      Answer answer;
-      if (openscreen::cast::Answer::TryParse(value[kAnswerMessageBody],
-                                             &answer)) {
-        message.body = std::move(answer);
+      auto answer_or_error =
+          openscreen::cast::Answer::TryParse(value[kAnswerMessageBody]);
+      if (answer_or_error.is_value()) {
+        message.body = std::move(answer_or_error.value());
         message.valid = true;
       }
     } break;
@@ -222,6 +226,16 @@ ErrorOr<ReceiverMessage> ReceiverMessage::Parse(const Json::Value& value) {
       if (json::TryParseString(value[kRpcMessageBody], &encoded_rpc) &&
           base64::Decode(encoded_rpc, &rpc)) {
         message.body = std::move(rpc);
+        message.valid = true;
+      }
+    } break;
+
+    case Type::kInput: {
+      std::string encoded_input;
+      std::vector<uint8_t> input;
+      if (json::TryParseString(value[kInputMessageBody], &encoded_input) &&
+          base64::Decode(encoded_input, &input)) {
+        message.body = std::move(input);
         message.valid = true;
       }
     } break;
@@ -247,10 +261,10 @@ ErrorOr<Json::Value> ReceiverMessage::ToJson() const {
     case ReceiverMessage::Type::kAnswer:
       if (valid) {
         root[kResult] = kResultOk;
-        root[kAnswerMessageBody] = absl::get<Answer>(body).ToJson();
+        root[kAnswerMessageBody] = std::get<Answer>(body).ToJson();
       } else {
         root[kResult] = kResultError;
-        root[kErrorMessageBody] = absl::get<ReceiverError>(body).ToJson();
+        root[kErrorMessageBody] = std::get<ReceiverError>(body).ToJson();
       }
       break;
 
@@ -258,17 +272,22 @@ ErrorOr<Json::Value> ReceiverMessage::ToJson() const {
       if (valid) {
         root[kResult] = kResultOk;
         root[kCapabilitiesMessageBody] =
-            absl::get<ReceiverCapability>(body).ToJson();
+            std::get<ReceiverCapability>(body).ToJson();
       } else {
         root[kResult] = kResultError;
-        root[kErrorMessageBody] = absl::get<ReceiverError>(body).ToJson();
+        root[kErrorMessageBody] = std::get<ReceiverError>(body).ToJson();
       }
       break;
 
     // NOTE: RPC messages do NOT have a result field.
     case ReceiverMessage::Type::kRpc:
       root[kRpcMessageBody] =
-          base64::Encode(absl::get<std::vector<uint8_t>>(body));
+          base64::Encode(std::get<std::vector<uint8_t>>(body));
+      break;
+
+    case ReceiverMessage::Type::kInput:
+      root[kInputMessageBody] =
+          base64::Encode(std::get<std::vector<uint8_t>>(body));
       break;
 
     default:

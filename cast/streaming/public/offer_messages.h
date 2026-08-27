@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "cast/streaming/impl/rtp_defines.h"
-#include "cast/streaming/impl/session_config.h"
 #include "cast/streaming/message_fields.h"
+#include "cast/streaming/public/session_config.h"
 #include "cast/streaming/resolution.h"
 #include "json/value.h"
 #include "platform/base/error.h"
@@ -43,9 +43,7 @@ inline constexpr int kDefaultNumAudioChannels = 2;
 struct Stream {
   enum class Type : uint8_t { kAudioSource, kVideoSource };
 
-  static Error TryParse(const Json::Value& root,
-                        Stream::Type type,
-                        Stream* out);
+  static ErrorOr<Stream> TryParse(const Json::Value& root, Stream::Type type);
   Json::Value ToJson() const;
   bool IsValid() const;
 
@@ -62,17 +60,22 @@ struct Stream {
   // must be converted to a 16 digit byte array.
   std::array<uint8_t, 16> aes_key = {};
   std::array<uint8_t, 16> aes_iv_mask = {};
-  bool receiver_rtcp_event_log = false;
-  std::string receiver_rtcp_dscp;
+
+  // The event logs are generally recommended for use in gathering statistics
+  // for the sender session.
+  bool receiver_rtcp_event_log = true;
+  std::optional<int> receiver_rtcp_dscp;
   int rtp_timebase = 0;
 
   // The codec parameter field honors the format laid out in RFC 6381:
   // https://datatracker.ietf.org/doc/html/rfc6381.
   std::string codec_parameter;
+
+  std::vector<std::string> rtp_extensions;
 };
 
 struct AudioStream {
-  static Error TryParse(const Json::Value& root, AudioStream* out);
+  static ErrorOr<AudioStream> TryParse(const Json::Value& root);
   Json::Value ToJson() const;
   bool IsValid() const;
 
@@ -82,7 +85,7 @@ struct AudioStream {
 };
 
 struct VideoStream {
-  static Error TryParse(const Json::Value& root, VideoStream* out);
+  static ErrorOr<VideoStream> TryParse(const Json::Value& root);
   Json::Value ToJson() const;
   bool IsValid() const;
 
@@ -97,14 +100,23 @@ struct VideoStream {
   std::string error_recovery_mode;
 };
 
+struct DataTransport {
+  static ErrorOr<DataTransport> TryParse(const Json::Value& root);
+  Json::Value ToJson() const;
+  bool IsValid() const;
+
+  DataTransportProtocol protocol;
+};
+
 struct Offer {
-  static Error TryParse(const Json::Value& root, Offer* out);
+  static ErrorOr<Offer> TryParse(const Json::Value& root);
   Json::Value ToJson() const;
   bool IsValid() const;
 
   CastMode cast_mode = CastMode::kMirroring;
   std::vector<AudioStream> audio_streams;
   std::vector<VideoStream> video_streams;
+  std::optional<DataTransport> data_transport;
 };
 
 }  // namespace openscreen::cast

@@ -7,7 +7,9 @@
 #include <inttypes.h>
 
 #include <algorithm>
+#include <format>
 #include <limits>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -20,7 +22,6 @@
 #include "util/json/json_serialization.h"
 #include "util/osp_logging.h"
 #include "util/string_util.h"
-#include "util/stringprintf.h"
 
 namespace openscreen::cast {
 
@@ -31,23 +32,24 @@ constexpr char kAudioSourceType[] = "audio_source";
 constexpr char kVideoSourceType[] = "video_source";
 constexpr char kStreamType[] = "type";
 
-bool CodecParameterIsValid(VideoCodec codec,
-                           const std::string& codec_parameter) {
-  if (codec_parameter.empty()) {
+[[nodiscard]] constexpr bool CodecParameterIsValid(VideoCodec codec,
+                                                   std::string_view parameter) {
+  if (parameter.empty()) {
     return true;
   }
   switch (codec) {
-    case VideoCodec::kVp8:
-      return string_util::starts_with(codec_parameter, "vp08");
-    case VideoCodec::kVp9:
-      return string_util::starts_with(codec_parameter, "vp09");
-    case VideoCodec::kAv1:
-      return string_util::starts_with(codec_parameter, "av01");
-    case VideoCodec::kHevc:
-      return string_util::starts_with(codec_parameter, "hev1");
-    case VideoCodec::kH264:
-      return string_util::starts_with(codec_parameter, "avc1");
-    case VideoCodec::kNotSpecified:
+    using enum VideoCodec;
+    case kVp8:
+      return parameter.starts_with("vp08");
+    case kVp9:
+      return parameter.starts_with("vp09");
+    case kAv1:
+      return parameter.starts_with("av01");
+    case kHevc:
+      return parameter.starts_with("hev1");
+    case kH264:
+      return parameter.starts_with("avc1");
+    case kNotSpecified:
       return false;
   }
   OSP_NOTREACHED();
@@ -60,7 +62,7 @@ bool CodecParameterIsValid(AudioCodec codec,
   }
   switch (codec) {
     case AudioCodec::kAac:
-      return string_util::starts_with(codec_parameter, "mp4a.");
+      return codec_parameter.starts_with("mp4a.");
 
     // Opus doesn't use codec parameters.
     case AudioCodec::kOpus:  // fallthrough
@@ -72,6 +74,9 @@ bool CodecParameterIsValid(AudioCodec codec,
 
 EnumNameTable<CastMode, 2> kCastModeNames{
     {{"mirroring", CastMode::kMirroring}, {"remoting", CastMode::kRemoting}}};
+
+EnumNameTable<DataTransportProtocol, 1> kDataTransportProtocolNames{
+    {{"webtransport", DataTransportProtocol::kWebTransport}}};
 
 bool TryParseRtpPayloadType(const Json::Value& value, RtpPayloadType* out) {
   int t;
@@ -125,8 +130,8 @@ bool TryParseAesHexBytes(const Json::Value& value,
       sscanf(hex_string.c_str(), "%16" SCNx64 "%16" SCNx64 "%n", &quads[0],
              &quads[1], &chars_scanned) == kNumScanFields &&
       chars_scanned == kAesStringLength &&
-      std::none_of(hex_string.begin(), hex_string.end(),
-                   [](char c) { return std::isspace(c); })) {
+      std::ranges::none_of(hex_string,
+                           [](char c) { return ascii_isspace(c); })) {
     WriteBigEndian(quads[0], out->data());
     WriteBigEndian(quads[1], out->data() + 8);
     return true;
@@ -157,12 +162,12 @@ bool TryParseResolutions(const Json::Value& value,
   }
 
   for (Json::ArrayIndex i = 0; i < value.size(); ++i) {
-    Resolution resolution;
-    if (!Resolution::TryParse(value[i], &resolution)) {
+    auto resolution = Resolution::TryParse(value[i]);
+    if (resolution.is_error()) {
       out->clear();
       return false;
     }
-    out->push_back(std::move(resolution));
+    out->push_back(std::move(resolution.value()));
   }
 
   return true;
@@ -170,54 +175,66 @@ bool TryParseResolutions(const Json::Value& value,
 
 }  // namespace
 
-Error Stream::TryParse(const Json::Value& value,
-                       Stream::Type type,
-                       Stream* out) {
-  out->type = type;
+ErrorOr<Stream> Stream::TryParse(const Json::Value& value, Stream::Type type) {
+  if (!value.isObject()) {
+    return Error(Error::Code::kJsonParseError, "Stream is not a JSON object");
+  }
 
-  if (!json::TryParseInt(value["index"], &out->index) ||
-      !json::TryParseUint(value["ssrc"], &out->ssrc) ||
-      !TryParseRtpPayloadType(value["rtpPayloadType"],
-                              &out->rtp_payload_type) ||
-      !TryParseRtpTimebase(value["timeBase"], &out->rtp_timebase)) {
+  Stream out;
+  out.type = type;
+
+  if (!json::TryParseInt(value["index"], &out.index) ||
+      !json::TryParseUint(value["ssrc"], &out.ssrc) ||
+      !TryParseRtpPayloadType(value["rtpPayloadType"], &out.rtp_payload_type) ||
+      !TryParseRtpTimebase(value["timeBase"], &out.rtp_timebase)) {
     return Error(Error::Code::kJsonParseError,
                  "Offer stream has missing or invalid mandatory field");
   }
 
-  if (!json::TryParseInt(value["channels"], &out->channels)) {
-    out->channels = out->type == Stream::Type::kAudioSource
-                        ? kDefaultNumAudioChannels
-                        : kDefaultNumVideoChannels;
-  } else if (out->channels <= 0) {
+  if (!json::TryParseInt(value["channels"], &out.channels)) {
+    out.channels = out.type == Stream::Type::kAudioSource
+                       ? kDefaultNumAudioChannels
+                       : kDefaultNumVideoChannels;
+  } else if (out.channels <= 0) {
     return Error(Error::Code::kJsonParseError, "Invalid channel count");
   }
 
-  if (!TryParseAesHexBytes(value["aesKey"], &out->aes_key) ||
-      !TryParseAesHexBytes(value["aesIvMask"], &out->aes_iv_mask)) {
+  if (!TryParseAesHexBytes(value["aesKey"], &out.aes_key) ||
+      !TryParseAesHexBytes(value["aesIvMask"], &out.aes_iv_mask)) {
     return Error(Error::Code::kUnencryptedOffer,
                  "Offer stream must have both a valid aesKey and aesIvMask");
   }
-  if (out->rtp_timebase <
+  if (out.rtp_timebase <
           std::min(kDefaultAudioMinSampleRate, kRtpVideoTimebase) ||
-      out->rtp_timebase > kRtpVideoTimebase) {
+      out.rtp_timebase > kRtpVideoTimebase) {
     return Error(Error::Code::kJsonParseError, "rtp_timebase (sample rate)");
   }
 
-  out->target_delay = kDefaultTargetPlayoutDelay;
+  out.target_delay = kDefaultTargetPlayoutDelay;
   int target_delay;
   if (json::TryParseInt(value["targetDelay"], &target_delay)) {
     auto d = std::chrono::milliseconds(target_delay);
     if (kMinTargetPlayoutDelay <= d && d <= kMaxTargetPlayoutDelay) {
-      out->target_delay = d;
+      out.target_delay = d;
     }
   }
 
   json::TryParseBool(value["receiverRtcpEventLog"],
-                     &out->receiver_rtcp_event_log);
-  json::TryParseString(value["receiverRtcpDscp"], &out->receiver_rtcp_dscp);
-  json::TryParseString(value["codecParameter"], &out->codec_parameter);
+                     &out.receiver_rtcp_event_log);
+  int dscp_value;
+  if (json::TryParseInt(value["receiverRtcpDscp"], &dscp_value)) {
+    // DSCP values are clamped to [0, 63].
+    if (dscp_value < 0 || dscp_value > 63) {
+      return Error(Error::Code::kJsonParseError,
+                   "receiverRtcpDscp (invalid DSCP value)");
+    }
+    out.receiver_rtcp_dscp = dscp_value;
+  }
 
-  return Error::None();
+  json::TryParseStringArray(value["rtpExtensions"], &out.rtp_extensions);
+  json::TryParseString(value["codecParameter"], &out.codec_parameter);
+
+  return out;
 }
 
 Json::Value Stream::ToJson() const {
@@ -238,9 +255,14 @@ Json::Value Stream::ToJson() const {
   root["aesKey"] = HexEncode(aes_key.data(), aes_key.size());
   root["aesIvMask"] = HexEncode(aes_iv_mask.data(), aes_iv_mask.size());
   root["receiverRtcpEventLog"] = receiver_rtcp_event_log;
-  root["receiverRtcpDscp"] = receiver_rtcp_dscp;
+  if (receiver_rtcp_dscp.has_value()) {
+    root["receiverRtcpDscp"] = receiver_rtcp_dscp.value();
+  }
   root["timeBase"] = "1/" + std::to_string(rtp_timebase);
   root["codecParameter"] = codec_parameter;
+  if (!rtp_extensions.empty()) {
+    root["rtpExtensions"] = json::PrimitiveVectorToJson(rtp_extensions);
+  }
   return root;
 }
 
@@ -250,16 +272,22 @@ bool Stream::IsValid() const {
          rtp_timebase >= 1;
 }
 
-Error AudioStream::TryParse(const Json::Value& value, AudioStream* out) {
-  Error error =
-      Stream::TryParse(value, Stream::Type::kAudioSource, &out->stream);
-  if (!error.ok()) {
-    return error;
+ErrorOr<AudioStream> AudioStream::TryParse(const Json::Value& value) {
+  if (!value.isObject()) {
+    return Error(Error::Code::kJsonParseError,
+                 "Audio stream is not a JSON object");
   }
 
+  auto stream_or_error = Stream::TryParse(value, Stream::Type::kAudioSource);
+  if (stream_or_error.is_error()) {
+    return stream_or_error.error();
+  }
+
+  AudioStream out;
+  out.stream = std::move(stream_or_error.value());
+
   std::string codec_name;
-  if (!json::TryParseInt(value["bitRate"], &out->bit_rate) ||
-      out->bit_rate < 0 ||
+  if (!json::TryParseInt(value["bitRate"], &out.bit_rate) || out.bit_rate < 0 ||
       !json::TryParseString(value[kCodecName], &codec_name)) {
     return Error(Error::Code::kJsonParseError, "Invalid audio stream field");
   }
@@ -268,14 +296,14 @@ Error AudioStream::TryParse(const Json::Value& value, AudioStream* out) {
     return Error(Error::Code::kUnknownCodec,
                  "Codec is not known, can't use stream");
   }
-  out->codec = codec.value();
-  if (!CodecParameterIsValid(codec.value(), out->stream.codec_parameter)) {
+  out.codec = codec.value();
+  if (!CodecParameterIsValid(codec.value(), out.stream.codec_parameter)) {
     return Error(Error::Code::kInvalidCodecParameter,
-                 StringPrintf("Invalid audio codec parameter (%s for codec %s)",
-                              out->stream.codec_parameter.c_str(),
-                              CodecToString(codec.value())));
+                 std::format("Invalid audio codec parameter ({} for codec {})",
+                             out.stream.codec_parameter.c_str(),
+                             CodecToString(codec.value())));
   }
-  return Error::None();
+  return out;
 }
 
 Json::Value AudioStream::ToJson() const {
@@ -291,12 +319,19 @@ bool AudioStream::IsValid() const {
   return bit_rate >= 0 && stream.IsValid();
 }
 
-Error VideoStream::TryParse(const Json::Value& value, VideoStream* out) {
-  Error error =
-      Stream::TryParse(value, Stream::Type::kVideoSource, &out->stream);
-  if (!error.ok()) {
-    return error;
+ErrorOr<VideoStream> VideoStream::TryParse(const Json::Value& value) {
+  if (!value.isObject()) {
+    return Error(Error::Code::kJsonParseError,
+                 "Video stream is not a JSON object");
   }
+
+  auto stream_or_error = Stream::TryParse(value, Stream::Type::kVideoSource);
+  if (stream_or_error.is_error()) {
+    return stream_or_error.error();
+  }
+
+  VideoStream out;
+  out.stream = std::move(stream_or_error.value());
 
   std::string codec_name;
   if (!json::TryParseString(value[kCodecName], &codec_name)) {
@@ -307,33 +342,33 @@ Error VideoStream::TryParse(const Json::Value& value, VideoStream* out) {
     return Error(Error::Code::kUnknownCodec,
                  "Codec is not known, can't use stream");
   }
-  out->codec = codec.value();
-  if (!CodecParameterIsValid(codec.value(), out->stream.codec_parameter)) {
+  out.codec = codec.value();
+  if (!CodecParameterIsValid(codec.value(), out.stream.codec_parameter)) {
     return Error(Error::Code::kInvalidCodecParameter,
-                 StringPrintf("Invalid video codec parameter (%s for codec %s)",
-                              out->stream.codec_parameter.c_str(),
-                              CodecToString(codec.value())));
+                 std::format("Invalid video codec parameter ({} for codec {})",
+                             out.stream.codec_parameter.c_str(),
+                             CodecToString(codec.value())));
   }
 
-  out->max_frame_rate = SimpleFraction{kDefaultMaxFrameRate, 1};
+  out.max_frame_rate = SimpleFraction{kDefaultMaxFrameRate, 1};
   std::string raw_max_frame_rate;
   if (json::TryParseString(value["maxFrameRate"], &raw_max_frame_rate)) {
     auto parsed = SimpleFraction::FromString(raw_max_frame_rate);
     if (parsed.is_value() && parsed.value().is_positive()) {
-      out->max_frame_rate = parsed.value();
+      out.max_frame_rate = parsed.value();
     }
   }
 
-  TryParseResolutions(value["resolutions"], &out->resolutions);
-  json::TryParseString(value["profile"], &out->profile);
-  json::TryParseString(value["protection"], &out->protection);
-  json::TryParseString(value["level"], &out->level);
-  json::TryParseString(value["errorRecoveryMode"], &out->error_recovery_mode);
-  if (!json::TryParseInt(value["maxBitRate"], &out->max_bit_rate)) {
-    out->max_bit_rate = 4 << 20;
+  TryParseResolutions(value["resolutions"], &out.resolutions);
+  json::TryParseString(value["profile"], &out.profile);
+  json::TryParseString(value["protection"], &out.protection);
+  json::TryParseString(value["level"], &out.level);
+  json::TryParseString(value["errorRecoveryMode"], &out.error_recovery_mode);
+  if (!json::TryParseInt(value["maxBitRate"], &out.max_bit_rate)) {
+    out.max_bit_rate = 4 << 20;
   }
 
-  return Error::None();
+  return out;
 }
 
 Json::Value VideoStream::ToJson() const {
@@ -360,8 +395,38 @@ bool VideoStream::IsValid() const {
   return max_bit_rate > 0 && max_frame_rate.is_positive();
 }
 
+ErrorOr<DataTransport> DataTransport::TryParse(const Json::Value& value) {
+  if (!value.isObject()) {
+    return Error(Error::Code::kJsonParseError, "null dataTransport");
+  }
+  std::string protocol_str;
+  if (!json::TryParseString(value["protocol"], &protocol_str)) {
+    return Error(Error::Code::kJsonParseError, "Invalid dataTransport field");
+  }
+  const ErrorOr<DataTransportProtocol> protocol =
+      GetEnum(kDataTransportProtocolNames, protocol_str);
+  if (protocol.is_error()) {
+    return Error(Error::Code::kJsonParseError,
+                 "Invalid dataTransport protocol");
+  }
+  DataTransport out;
+  out.protocol = protocol.value();
+  return out;
+}
+
+Json::Value DataTransport::ToJson() const {
+  OSP_CHECK(IsValid());
+  Json::Value out;
+  out["protocol"] = GetEnumName(kDataTransportProtocolNames, protocol).value();
+  return out;
+}
+
+bool DataTransport::IsValid() const {
+  return protocol != DataTransportProtocol::kUnknown;
+}
+
 // static
-Error Offer::TryParse(const Json::Value& root, Offer* out) {
+ErrorOr<Offer> Offer::TryParse(const Json::Value& root) {
   if (!root.isObject()) {
     return Error(Error::Code::kJsonParseError, "null offer");
   }
@@ -374,6 +439,9 @@ Error Offer::TryParse(const Json::Value& root, Offer* out) {
 
   std::vector<AudioStream> audio_streams;
   std::vector<VideoStream> video_streams;
+
+  using Dscp = std::optional<int>;
+  std::optional<Dscp> receiver_rtcp_dscp;
   for (Json::ArrayIndex i = 0; i < supported_streams.size(); ++i) {
     const Json::Value& fields = supported_streams[i];
     std::string type;
@@ -381,24 +449,40 @@ Error Offer::TryParse(const Json::Value& root, Offer* out) {
       return Error(Error::Code::kJsonParseError, "Missing stream type");
     }
 
-    Error error;
+    Error error = Error::None();
     if (type == kAudioSourceType) {
-      AudioStream stream;
-      error = AudioStream::TryParse(fields, &stream);
-      if (error.ok()) {
+      auto stream_or_error = AudioStream::TryParse(fields);
+      if (stream_or_error.is_value()) {
+        auto stream = std::move(stream_or_error.value());
+        if (!receiver_rtcp_dscp) {
+          receiver_rtcp_dscp.emplace(stream.stream.receiver_rtcp_dscp);
+        } else if (stream.stream.receiver_rtcp_dscp != *receiver_rtcp_dscp) {
+          return Error(Error::Code::kJsonParseError,
+                       "Mixed DSCP values in offer");
+        }
         audio_streams.push_back(std::move(stream));
+      } else {
+        error = stream_or_error.error();
       }
     } else if (type == kVideoSourceType) {
-      VideoStream stream;
-      error = VideoStream::TryParse(fields, &stream);
-      if (error.ok()) {
+      auto stream_or_error = VideoStream::TryParse(fields);
+      if (stream_or_error.is_value()) {
+        auto stream = std::move(stream_or_error.value());
+        if (!receiver_rtcp_dscp) {
+          receiver_rtcp_dscp.emplace(stream.stream.receiver_rtcp_dscp);
+        } else if (stream.stream.receiver_rtcp_dscp != *receiver_rtcp_dscp) {
+          return Error(Error::Code::kJsonParseError,
+                       "Mixed DSCP values in offer");
+        }
         video_streams.push_back(std::move(stream));
+      } else {
+        error = stream_or_error.error();
       }
     }
 
     if (!error.ok()) {
       if (error.code() == Error::Code::kUnknownCodec) {
-        OSP_VLOG << "Dropping audio stream due to unknown codec: " << error;
+        OSP_VLOG << "Dropping stream due to unknown codec: " << error;
         continue;
       } else {
         return error;
@@ -406,9 +490,22 @@ Error Offer::TryParse(const Json::Value& root, Offer* out) {
     }
   }
 
-  *out = Offer{cast_mode.value(CastMode::kMirroring), std::move(audio_streams),
-               std::move(video_streams)};
-  return Error::None();
+  std::optional<DataTransport> data_transport;
+  if (root.isMember("dataTransport")) {
+    auto transport_or_error = DataTransport::TryParse(root["dataTransport"]);
+    if (transport_or_error.is_value()) {
+      data_transport = std::move(transport_or_error.value());
+    } else {
+      return transport_or_error.error();
+    }
+  }
+
+  Offer offer{cast_mode.value(CastMode::kMirroring), std::move(audio_streams),
+              std::move(video_streams), std::move(data_transport)};
+  if (!offer.IsValid()) {
+    return Error(Error::Code::kJsonParseError, "Invalid offer");
+  }
+  return offer;
 }
 
 Json::Value Offer::ToJson() const {
@@ -425,13 +522,19 @@ Json::Value Offer::ToJson() const {
   }
 
   root[kSupportedStreams] = std::move(streams);
+
+  if (data_transport.has_value()) {
+    root["dataTransport"] = data_transport->ToJson();
+  }
+
   return root;
 }
 
 bool Offer::IsValid() const {
-  return std::all_of(audio_streams.begin(), audio_streams.end(),
-                     [](const AudioStream& a) { return a.IsValid(); }) &&
-         std::all_of(video_streams.begin(), video_streams.end(),
-                     [](const VideoStream& v) { return v.IsValid(); });
+  return std::ranges::all_of(
+             audio_streams, [](const AudioStream& a) { return a.IsValid(); }) &&
+         std::ranges::all_of(
+             video_streams, [](const VideoStream& v) { return v.IsValid(); }) &&
+         (!data_transport.has_value() || data_transport->IsValid());
 }
 }  // namespace openscreen::cast

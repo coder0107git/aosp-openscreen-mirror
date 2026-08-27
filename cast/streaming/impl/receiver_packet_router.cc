@@ -7,10 +7,9 @@
 #include <algorithm>
 
 #include "cast/streaming/impl/packet_util.h"
-#include "cast/streaming/public/receiver.h"
 #include "platform/base/span.h"
 #include "util/osp_logging.h"
-#include "util/stringprintf.h"
+#include "util/string_util.h"
 
 namespace openscreen::cast {
 
@@ -21,25 +20,25 @@ ReceiverPacketRouter::~ReceiverPacketRouter() {
   OSP_CHECK(receivers_.empty());
 }
 
-void ReceiverPacketRouter::OnReceiverCreated(Ssrc sender_ssrc,
-                                             Receiver* receiver) {
+void ReceiverPacketRouter::RegisterPacketConsumer(Ssrc sender_ssrc,
+                                                  PacketConsumer* receiver) {
   OSP_CHECK(receivers_.find(sender_ssrc) == receivers_.end());
   receivers_.emplace_back(sender_ssrc, receiver);
 
-  // If there were no Receiver instances before, resume receiving packets for
-  // dispatch. Reset/Clear the remote endpoint, in preparation for later setting
-  // it to the source of the first packet received.
+  // If there were no PacketConsumer instances before, resume receiving packets
+  // for dispatch. Reset/Clear the remote endpoint, in preparation for later
+  // setting it to the source of the first packet received.
   if (receivers_.size() == 1) {
-    environment_.set_remote_endpoint(IPEndpoint{});
-    environment_.ConsumeIncomingPackets(this);
+    environment_->set_remote_endpoint(IPEndpoint{});
+    environment_->ConsumeIncomingPackets(this);
   }
 }
 
-void ReceiverPacketRouter::OnReceiverDestroyed(Ssrc sender_ssrc) {
+void ReceiverPacketRouter::DeregisterPacketConsumer(Ssrc sender_ssrc) {
   receivers_.erase_key(sender_ssrc);
-  // If there are no longer any Receivers, suspend receiving packets.
+  // If there are no longer any PacketConsumers, suspend receiving packets.
   if (receivers_.empty()) {
-    environment_.DropIncomingPackets();
+    environment_->DropIncomingPackets();
   }
 }
 
@@ -47,12 +46,12 @@ void ReceiverPacketRouter::SendRtcpPacket(ByteView packet) {
   OSP_CHECK(InspectPacketForRouting(packet).first == ApparentPacketType::RTCP);
 
   // Do not proceed until the remote endpoint is known. See OnReceivedPacket().
-  if (environment_.remote_endpoint().port == 0) {
+  if (environment_->remote_endpoint().port == 0) {
     return;
   }
 
-  environment_.SendPacket(ByteView(packet.data(), packet.size()),
-                          PacketMetadata{});
+  environment_->SendPacket(ByteView(packet.data(), packet.size()),
+                           PacketMetadata{});
 }
 
 void ReceiverPacketRouter::OnReceivedPacket(const IPEndpoint& source,
@@ -62,8 +61,8 @@ void ReceiverPacketRouter::OnReceivedPacket(const IPEndpoint& source,
 
   // If the sender endpoint is known, ignore any packet that did not come from
   // that same endpoint.
-  if (environment_.remote_endpoint().port != 0) {
-    if (source != environment_.remote_endpoint()) {
+  if (environment_->remote_endpoint().port != 0) {
+    if (source != environment_->remote_endpoint()) {
       return;
     }
   }
@@ -86,14 +85,14 @@ void ReceiverPacketRouter::OnReceivedPacket(const IPEndpoint& source,
   // At this point, a valid packet has been matched with a receiver. Lock-in
   // the remote endpoint as the `source` of this `packet` so that only packets
   // from the same source are permitted from here onwards.
-  if (environment_.remote_endpoint().port == 0) {
-    environment_.set_remote_endpoint(source);
+  if (environment_->remote_endpoint().port == 0) {
+    environment_->set_remote_endpoint(source);
   }
 
   if (seems_like.first == ApparentPacketType::RTP) {
     it->second->OnReceivedRtpPacket(arrival_time, std::move(packet));
   } else if (seems_like.first == ApparentPacketType::RTCP) {
-    it->second->OnReceivedRtcpPacket(arrival_time, std::move(packet));
+    it->second->OnReceivedRtcpPacket(arrival_time, packet);
   }
 }
 

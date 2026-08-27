@@ -9,6 +9,7 @@
 
 #include "cast/streaming/impl/packet_util.h"
 #include "cast/streaming/impl/rtcp_session.h"
+#include "cast/streaming/impl/statistics_common.h"
 #include "util/chrono_helpers.h"
 #include "util/osp_logging.h"
 #include "util/std_util.h"
@@ -20,8 +21,6 @@ namespace {
 // Use the Clock's minimum time value (an impossible value, waaaaay before epoch
 // time) to represent unset time_point values.
 constexpr auto kNullTimePoint = Clock::time_point::min();
-
-constexpr uint32_t kCastName = ('C' << 24) + ('A' << 16) + ('S' << 8) + 'T';
 
 // Some receivers send time sync requests (that we ignore).
 constexpr uint32_t kTimeSyncRequestName =
@@ -80,40 +79,6 @@ void CanonicalizePacketNackVector(std::vector<PacketNack>* packets) {
   }
 }
 
-// TODO(issuetracker.google.com/298085631): implement the serialization of
-// StatisticsEventType to wire type as part of implementing receiver side event
-// generation.
-// NOTE: the legacy mappings, like AudioAckSent below, may still be in use
-// on some legacy receivers.
-StatisticsEventType ToEventTypeFromWire(uint8_t wire_event) {
-  switch (wire_event) {
-    case 1:   // AudioAckSent
-    case 5:   // VideoAckSent
-    case 11:  // Unified
-      return StatisticsEventType::kFrameAckSent;
-
-    case 2:   // AudioPlayoutDelay
-    case 7:   // VideoRenderDelay
-    case 12:  // Unified
-      return StatisticsEventType::kFramePlayedOut;
-
-    case 3:   // AudioFrameDecoded
-    case 6:   // VideoFrameDecoded
-    case 13:  // Unified
-      return StatisticsEventType::kFrameDecoded;
-
-    case 4:   // AudioPacketReceived
-    case 8:   // VideoPacketReceived
-    case 14:  // Unified
-      return StatisticsEventType::kPacketReceived;
-
-    default:
-      OSP_VLOG << "Unexpected RTCP log message received: "
-               << static_cast<int>(wire_event);
-      return StatisticsEventType::kUnknown;
-  }
-}
-
 }  // namespace
 
 CompoundRtcpParser::CompoundRtcpParser(RtcpSession& session,
@@ -145,12 +110,12 @@ bool CompoundRtcpParser::Parse(ByteView buffer, FrameId max_feedback_frame_id) {
     if (!header) {
       return false;
     }
-    buffer.remove_prefix(kRtcpCommonHeaderSize);
+    buffer = buffer.subspan(kRtcpCommonHeaderSize);
     if (static_cast<int>(buffer.size()) < header->payload_size) {
       return false;
     }
     ByteView payload = buffer.subspan(0, header->payload_size);
-    buffer.remove_prefix(header->payload_size);
+    buffer = buffer.subspan(header->payload_size);
 
     switch (header->packet_type) {
       case RtcpPacketType::kReceiverReport:
@@ -215,30 +180,30 @@ bool CompoundRtcpParser::Parse(ByteView buffer, FrameId max_feedback_frame_id) {
       return true;
     }
     latest_receiver_timestamp_ = receiver_reference_time;
-    client_.OnReceiverReferenceTimeAdvanced(latest_receiver_timestamp_);
+    client_->OnReceiverReferenceTimeAdvanced(latest_receiver_timestamp_);
   }
 
   // At this point, the packet is known to be well-formed. Dispatch events of
   // interest to the Client.
   if (receiver_report) {
-    client_.OnReceiverReport(*receiver_report);
+    client_->OnReceiverReport(*receiver_report);
   }
   if (!log_messages.empty()) {
-    client_.OnCastReceiverFrameLogMessages(std::move(log_messages));
+    client_->OnCastReceiverFrameLogMessages(std::move(log_messages));
   }
   if (!checkpoint_frame_id.is_null()) {
-    client_.OnReceiverCheckpoint(checkpoint_frame_id, target_playout_delay);
+    client_->OnReceiverCheckpoint(checkpoint_frame_id, target_playout_delay);
   }
   if (!received_frames.empty()) {
     OSP_DCHECK(AreElementsSortedAndUnique(received_frames));
-    client_.OnReceiverHasFrames(std::move(received_frames));
+    client_->OnReceiverHasFrames(std::move(received_frames));
   }
   CanonicalizePacketNackVector(&packet_nacks);
   if (!packet_nacks.empty()) {
-    client_.OnReceiverIsMissingPackets(std::move(packet_nacks));
+    client_->OnReceiverIsMissingPackets(std::move(packet_nacks));
   }
   if (picture_loss_indicator) {
-    client_.OnReceiverIndicatesPictureLoss();
+    client_->OnReceiverIndicatesPictureLoss();
   }
 
   return true;
@@ -251,9 +216,9 @@ bool CompoundRtcpParser::ParseReceiverReport(
   if (in.size() < kRtcpReceiverReportSize) {
     return false;
   }
-  if (ConsumeField<uint32_t>(in) == session_.receiver_ssrc()) {
+  if (ConsumeField<uint32_t>(in) == session_->receiver_ssrc()) {
     receiver_report = RtcpReportBlock::ParseOne(in, num_report_blocks,
-                                                session_.sender_ssrc());
+                                                session_->sender_ssrc());
   }
   return true;
 }
@@ -262,11 +227,15 @@ bool CompoundRtcpParser::ParseApplicationDefined(
     RtcpSubtype subtype,
     ByteView in,
     std::vector<RtcpReceiverFrameLogMessage>& messages) {
+  if (in.size() < 2 * sizeof(uint32_t)) {
+    return false;
+  }
+
   const uint32_t sender_ssrc = ConsumeField<uint32_t>(in);
   const uint32_t name = ConsumeField<uint32_t>(in);
 
   // Just ignore events that aren't intended for us.
-  if (sender_ssrc != session_.receiver_ssrc()) {
+  if (sender_ssrc != session_->receiver_ssrc()) {
     return true;
   }
   if (name != kCastName) {
@@ -294,7 +263,7 @@ bool CompoundRtcpParser::ParseFrameLogMessages(
     // offset from when the first packet was sent.
     const uint32_t raw_timestamp = data & 0xFFFFFF;
     const Clock::time_point event_timestamp_base =
-        session_.start_time() + milliseconds(raw_timestamp);
+        session_->start_time() + milliseconds(raw_timestamp);
 
     // The 8 most significant bits contain the number of events.
     // NOTE: at least one event is required, so a value of "0" over the wire
@@ -317,9 +286,10 @@ bool CompoundRtcpParser::ParseFrameLogMessages(
           ConsumeField<uint16_t>(in);
 
       // Skip unknown event types, they are not useful.
-      const StatisticsEventType event_type = ToEventTypeFromWire(
-          static_cast<uint8_t>(event_type_and_timestamp_delta >> 12));
-      if (event_type == StatisticsEventType::kUnknown) {
+      const auto event_type =
+          StatisticsEvent::FromWireType(static_cast<StatisticsEvent::WireType>(
+              event_type_and_timestamp_delta >> 12));
+      if (event_type == StatisticsEvent::Type::kUnknown) {
         continue;
       }
 
@@ -327,7 +297,7 @@ bool CompoundRtcpParser::ParseFrameLogMessages(
           .type = event_type,
           .timestamp = event_timestamp_base +
                        milliseconds(event_type_and_timestamp_delta & 0xFFF)};
-      if (event_type == StatisticsEventType::kPacketReceived) {
+      if (event_type == StatisticsEvent::Type::kPacketReceived) {
         event_log.packet_id = delay_delta_or_packet_id;
       } else {
         event_log.delay =
@@ -353,8 +323,8 @@ bool CompoundRtcpParser::ParseFeedback(ByteView in,
   if (static_cast<int>(in.size()) < kRtcpFeedbackHeaderSize) {
     return false;
   }
-  if (ConsumeField<uint32_t>(in) != session_.receiver_ssrc() ||
-      ConsumeField<uint32_t>(in) != session_.sender_ssrc()) {
+  if (ConsumeField<uint32_t>(in) != session_->receiver_ssrc() ||
+      ConsumeField<uint32_t>(in) != session_->sender_ssrc()) {
     return true;  // Ignore report from mismatched SSRC(s).
   }
   if (ConsumeField<uint32_t>(in) != kRtcpCastIdentifierWord) {
@@ -412,7 +382,7 @@ bool CompoundRtcpParser::ParseFeedback(ByteView in,
   }
   // Skip over the "Feedback Count" field. It's currently unused, though it
   // might be useful for event tracing later...
-  in.remove_prefix(sizeof(uint8_t));
+  in = in.subspan(sizeof(uint8_t));
   const int ack_bitvector_octet_count = ConsumeField<uint8_t>(in);
   if (static_cast<int>(in.size()) < ack_bitvector_octet_count) {
     return false;
@@ -444,7 +414,7 @@ bool CompoundRtcpParser::ParseExtendedReports(
   if (static_cast<int>(in.size()) < kRtcpExtendedReportHeaderSize) {
     return false;
   }
-  if (ConsumeField<uint32_t>(in) != session_.receiver_ssrc()) {
+  if (ConsumeField<uint32_t>(in) != session_->receiver_ssrc()) {
     return true;  // Ignore report from unknown receiver.
   }
 
@@ -454,7 +424,7 @@ bool CompoundRtcpParser::ParseExtendedReports(
       return false;
     }
     const uint8_t block_type = ConsumeField<uint8_t>(in);
-    in.remove_prefix(sizeof(uint8_t));  // Skip the "reserved" byte.
+    in = in.subspan(sizeof(uint8_t));  // Skip the "reserved" byte.
     const int block_data_size =
         static_cast<int>(ConsumeField<uint16_t>(in)) * 4;
     if (static_cast<int>(in.size()) < block_data_size) {
@@ -464,12 +434,12 @@ bool CompoundRtcpParser::ParseExtendedReports(
       if (block_data_size != sizeof(uint64_t)) {
         return false;  // Length field must always be 2 words.
       }
-      receiver_reference_time = session_.ntp_converter().ToLocalTime(
+      receiver_reference_time = session_->ntp_converter().ToLocalTime(
           ReadBigEndian<uint64_t>(in.data()));
     } else {
       // Ignore any other type of extended report.
     }
-    in.remove_prefix(block_data_size);
+    in = in.subspan(block_data_size);
   }
 
   return true;
@@ -482,8 +452,8 @@ bool CompoundRtcpParser::ParsePictureLossIndicator(
     return false;
   }
   // Only set the flag if the PLI is from the Receiver and to this Sender.
-  if (ConsumeField<uint32_t>(in) == session_.receiver_ssrc() &&
-      ConsumeField<uint32_t>(in) == session_.sender_ssrc()) {
+  if (ConsumeField<uint32_t>(in) == session_->receiver_ssrc() &&
+      ConsumeField<uint32_t>(in) == session_->sender_ssrc()) {
     picture_loss_indicator = true;
   }
   return true;

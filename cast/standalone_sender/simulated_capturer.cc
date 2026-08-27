@@ -12,7 +12,7 @@
 #include <sstream>
 #include <thread>
 
-#include "cast/standalone_sender/ffmpeg_glue.h"
+#include "cast/standalone_common/ffmpeg_glue.h"
 #include "cast/streaming/public/environment.h"
 #include "util/osp_logging.h"
 
@@ -228,7 +228,8 @@ void SimulatedCapturer::ConsumeNextDecodedFrame() {
 
   next_task_.Schedule(
       [this, reference_time] {
-        DeliverDataToClient(*decoded_frame_, capture_begin_time_, now_(),
+        DeliverDataToClient(*decoded_frame_, capture_begin_time_,
+                            capture_begin_time_ + std::chrono::milliseconds(10),
                             reference_time);
         av_frame_unref(decoded_frame_.get());
         ConsumeNextDecodedFrame();

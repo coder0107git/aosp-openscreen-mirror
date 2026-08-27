@@ -21,9 +21,10 @@
 #include "platform/api/time.h"
 #include "platform/test/paths.h"
 #include "util/crypto/pem_helpers.h"
+#include "util/no_destructor.h"
 #include "util/osp_logging.h"
+#include "util/raw_ref.h"
 #include "util/read_file.h"
-#include "util/span_util.h"
 
 namespace openscreen::cast {
 
@@ -117,8 +118,9 @@ bool ConvertTimeSeconds(const DateTime& time, uint64_t* seconds) {
 }
 
 const std::string& GetSpecificTestDataPath() {
-  static std::string data_path = GetTestDataPath() + "cast/common/certificate/";
-  return data_path;
+  static const NoDestructor<std::string> data_path(GetTestDataPath() +
+                                                   "cast/common/certificate/");
+  return *data_path;
 }
 
 class CastAuthUtilTest : public ::testing::Test {
@@ -155,7 +157,7 @@ class CastAuthUtilTest : public ::testing::Test {
         response.set_signature(ByteViewToString(signatures.sha256));
         break;
     }
-    signed_data->assign(signatures.message.cbegin(), signatures.message.cend());
+    signed_data->assign(signatures.message.begin(), signatures.message.end());
     return response;
   }
 
@@ -167,7 +169,7 @@ class CastAuthUtilTest : public ::testing::Test {
     (*data)[0] = ~(*data)[0];
   }
 
-  const std::string& data_path_{GetSpecificTestDataPath()};
+  const raw_ref<const std::string> data_path_{GetSpecificTestDataPath()};
   std::unique_ptr<TrustStore> cast_trust_store_{CastTrustStore::Create()};
   std::unique_ptr<TrustStore> crl_trust_store_{CastCRLTrustStore::Create()};
 };
@@ -293,7 +295,7 @@ TEST_F(CastAuthUtilTest, VerifySenderNonceMissing) {
 
 TEST_F(CastAuthUtilTest, VerifyTLSCertificateSuccess) {
   std::vector<std::string> tls_cert_der = ReadCertificatesFromPemFile(
-      data_path_ + "certificates/test_tls_cert.pem");
+      (*data_path_) + "certificates/test_tls_cert.pem");
   std::string& der_cert = tls_cert_der[0];
   std::unique_ptr<ParsedCertificate> tls_cert = ParseX509Der(der_cert);
   ErrorOr<DateTime> maybe_not_before = tls_cert->GetNotBeforeTime();
@@ -308,7 +310,7 @@ TEST_F(CastAuthUtilTest, VerifyTLSCertificateSuccess) {
 
 TEST_F(CastAuthUtilTest, VerifyTLSCertificateTooEarly) {
   std::vector<std::string> tls_cert_der = ReadCertificatesFromPemFile(
-      data_path_ + "certificates/test_tls_cert.pem");
+      (*data_path_) + "certificates/test_tls_cert.pem");
   std::string& der_cert = tls_cert_der[0];
   std::unique_ptr<ParsedCertificate> tls_cert = ParseX509Der(der_cert);
   ErrorOr<DateTime> maybe_not_before = tls_cert->GetNotBeforeTime();
@@ -326,7 +328,7 @@ TEST_F(CastAuthUtilTest, VerifyTLSCertificateTooEarly) {
 
 TEST_F(CastAuthUtilTest, VerifyTLSCertificateTooLate) {
   std::vector<std::string> tls_cert_der = ReadCertificatesFromPemFile(
-      data_path_ + "certificates/test_tls_cert.pem");
+      (*data_path_) + "certificates/test_tls_cert.pem");
   std::string& der_cert = tls_cert_der[0];
   std::unique_ptr<ParsedCertificate> tls_cert = ParseX509Der(der_cert);
   ErrorOr<DateTime> maybe_not_after = tls_cert->GetNotAfterTime();

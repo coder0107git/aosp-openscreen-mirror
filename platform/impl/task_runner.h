@@ -16,17 +16,19 @@
 #include "platform/api/task_runner.h"
 #include "platform/api/time.h"
 #include "platform/base/error.h"
+#include "util/raw_ptr.h"
+#include "util/thread_annotations.h"
 #include "util/trace_logging.h"
 
 namespace openscreen {
 
-class TaskRunnerImpl final : public TaskRunner {
+class TaskRunnerImpl : public TaskRunner {
  public:
   using Task = TaskRunner::Task;
 
   class TaskWaiter {
    public:
-    virtual ~TaskWaiter() = default;
+    virtual ~TaskWaiter();
 
     // These calls should be thread-safe.  The absolute minimum is that
     // OnTaskPosted must be safe to call from another thread while this is
@@ -48,22 +50,26 @@ class TaskRunnerImpl final : public TaskRunner {
       ClockNowFunctionPtr now_function,
       TaskWaiter* event_waiter = nullptr,
       Clock::duration waiter_timeout = std::chrono::milliseconds(100));
+  TaskRunnerImpl(const TaskRunnerImpl&) = delete;
+  TaskRunnerImpl(TaskRunnerImpl&&) noexcept = delete;
+  TaskRunnerImpl& operator=(const TaskRunnerImpl&) = delete;
+  TaskRunnerImpl& operator=(TaskRunnerImpl&&) = delete;
 
   // TaskRunner overrides
-  ~TaskRunnerImpl() final;
-  void PostPackagedTask(Task task) final;
-  void PostPackagedTaskWithDelay(Task task, Clock::duration delay) final;
-  bool IsRunningOnTaskRunner() final;
+  ~TaskRunnerImpl() override;
+  void PostPackagedTask(Task task) override;
+  void PostPackagedTaskWithDelay(Task task, Clock::duration delay) override;
+  bool IsRunningOnTaskRunner() override;
 
   // Blocks the current thread, executing tasks from the queue with the desired
   // timing; and does not return until some time after RequestStopSoon() is
   // called.
-  void RunUntilStopped();
+  virtual void RunUntilStopped();
 
   // Blocks the current thread, executing tasks from the queue with the desired
   // timing; and does not return until some time after the current process is
   // signaled with SIGINT or SIGTERM, or after RequestStopSoon() is called.
-  void RunUntilSignaled();
+  virtual void RunUntilSignaled();
 
   // Thread-safe method for requesting the TaskRunner to stop running after all
   // non-delayed tasks in the queue have run. This behavior allows final
@@ -71,7 +77,7 @@ class TaskRunnerImpl final : public TaskRunner {
   //
   // If any non-delayed tasks post additional non-delayed tasks, those will be
   // run as well before returning.
-  void RequestStopSoon();
+  virtual void RequestStopSoon();
 
  private:
 #if defined(ENABLE_TRACE_LOGGING)
@@ -110,7 +116,7 @@ class TaskRunnerImpl final : public TaskRunner {
   // there are no ready-to-run tasks, and `is_running_` is true, this method
   // will block waiting for new tasks. Returns true if any tasks were
   // transferred.
-  bool GrabMoreRunnableTasks();
+  bool GrabMoreRunnableTasks() OSP_NO_THREAD_SAFETY_ANALYSIS;
 
   const ClockNowFunctionPtr now_function_;
 
@@ -122,15 +128,14 @@ class TaskRunnerImpl final : public TaskRunner {
   // notifying the run loop to wake up when it is waiting for a task to be added
   // to the queue in `run_loop_wakeup_`.
   std::mutex task_mutex_;
-  std::vector<TaskWithMetadata> tasks_;  // ABSL_GUARDED_BY(task_mutex_)
-  std::multimap<Clock::time_point, TaskWithMetadata>
-      delayed_tasks_;  // ABSL_GUARDED_BY(task_mutex_)
+  std::vector<TaskWithMetadata> tasks_ OSP_GUARDED_BY(task_mutex_);
+  std::multimap<Clock::time_point, TaskWithMetadata> delayed_tasks_ OSP_GUARDED_BY(task_mutex_);
 
   // When `task_waiter_` is nullptr, `run_loop_wakeup_` is used for sleeping the
   // task runner.  Otherwise, `run_loop_wakeup_` isn't used and `task_waiter_`
   // is used instead (along with `waiter_timeout_`).
   std::condition_variable run_loop_wakeup_;
-  TaskWaiter* const task_waiter_;
+  const raw_ptr<TaskWaiter> task_waiter_;
   Clock::duration waiter_timeout_;
 
   // To prevent excessive re-allocation of the underlying array of the `tasks_`
@@ -139,8 +144,6 @@ class TaskRunnerImpl final : public TaskRunner {
   std::vector<TaskWithMetadata> running_tasks_;
 
   std::thread::id task_runner_thread_id_;
-
-  OSP_DISALLOW_COPY_AND_ASSIGN(TaskRunnerImpl);
 };
 }  // namespace openscreen
 

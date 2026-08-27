@@ -4,8 +4,12 @@
 
 #include "cast/streaming/public/receiver_session.h"
 
+#include <functional>
+#include <memory>
 #include <utility>
 
+#include "cast/streaming/impl/message_constants.h"
+#include "cast/streaming/input.pb.h"
 #include "cast/streaming/public/receiver.h"
 #include "cast/streaming/testing/mock_environment.h"
 #include "cast/streaming/testing/simple_message_port.h"
@@ -16,10 +20,10 @@
 #include "platform/test/fake_task_runner.h"
 #include "util/chrono_helpers.h"
 #include "util/json/json_serialization.h"
+#include "util/std_util.h"
 
 using ::testing::_;
 using ::testing::InSequence;
-using ::testing::Invoke;
 using ::testing::NiceMock;
 using ::testing::Return;
 using ::testing::StrictMock;
@@ -48,6 +52,7 @@ constexpr char kValidOfferMessage[] = R"({
         "level": "4",
         "aesKey": "bbf109bf84513b456b13a184453b66ce",
         "aesIvMask": "edaf9e4536e2b66191f560d9c04b2a69",
+        "receiverRtcpDscp": 46,
         "resolutions": [
           {
             "width": 1280,
@@ -69,6 +74,7 @@ constexpr char kValidOfferMessage[] = R"({
         "level": "4",
         "aesKey": "040d756791711fd3adb939066e6d8690",
         "aesIvMask": "9ff0f022a959150e70a2d05a6c184aed",
+        "receiverRtcpDscp": 46,
         "resolutions": [
           {
             "width": 1280,
@@ -89,6 +95,7 @@ constexpr char kValidOfferMessage[] = R"({
         "maxBitRate": 5000000,
         "aesKey": "040d756791711fd3adb939066e6d8690",
         "aesIvMask": "9ff0f022a959150e70a2d05a6c184aed",
+        "receiverRtcpDscp": 46,
         "resolutions": [
           {
             "width": 1920,
@@ -107,7 +114,8 @@ constexpr char kValidOfferMessage[] = R"({
         "timeBase": "1/48000",
         "channels": 2,
         "aesKey": "51027e4e2347cbcb49d57ef10177aebc",
-        "aesIvMask": "7f12a19be62a36c04ae4116caaeff6d1"
+        "aesIvMask": "7f12a19be62a36c04ae4116caaeff6d1",
+        "receiverRtcpDscp": 46
       }
     ]
   }
@@ -309,6 +317,44 @@ constexpr char kRpcMessage[] = R"({
   "rpc" : "CGQQnBiCGQgSAggMGgIIBg==",
   "seqNum" : 2,
   "type" : "RPC"
+})";
+
+constexpr char kValidOfferMessageWithInput[] = R"({
+  "type": "OFFER",
+  "seqNum": 1337,
+  "offer": {
+    "castMode": "mirroring",
+    "supportedStreams": [
+      {
+        "index": 31338,
+        "type": "video_source",
+        "codecName": "vp8",
+        "rtpProfile": "cast",
+        "rtpPayloadType": 127,
+        "ssrc": 19088745,
+        "maxFrameRate": "60000/1000",
+        "timeBase": "1/90000",
+        "maxBitRate": 5000000,
+        "profile": "main",
+        "level": "4",
+        "aesKey": "040d756791711fd3adb939066e6d8690",
+        "aesIvMask": "9ff0f022a959150e70a2d05a6c184aed",
+        "rtpExtensions": ["input_events"],
+        "resolutions": [
+          {
+            "width": 1280,
+            "height": 720
+          }
+        ]
+      }
+    ]
+  }
+})";
+
+constexpr char kInputMessage[] = R"({
+  "input" : "CGQQnBiCGQgSAggMGgIIBg==",
+  "seqNum" : 3,
+  "type" : "INPUT"
 })";
 
 class FakeClient : public ReceiverSession::Client {
@@ -1026,6 +1072,180 @@ TEST_F(ReceiverSessionTest, HandlesRpcMessage) {
 
   message_port_->ReceiveMessage(kValidRemotingOfferMessage);
   ASSERT_TRUE(received_initialize_message);
+}
+
+TEST_F(ReceiverSessionTest, EnablesDscpInAnswer) {
+  ReceiverConstraints constraints;
+  constraints.enable_dscp = true;
+  SetUpWithConstraints(std::move(constraints));
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _));
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+  message_port_->ReceiveMessage(kValidOfferMessage);
+  const std::vector<std::string>& messages = message_port_->posted_messages();
+  ASSERT_EQ(1u, messages.size());
+  Json::Value message = ExpectIsValidAnswer(messages[0]);
+  const Json::Value& answer = message["answer"];
+  ASSERT_TRUE(answer.isObject());
+  const Json::Value& dscp = answer["receiverRtcpDscp"];
+  ASSERT_FALSE(dscp.empty());
+  EXPECT_EQ(dscp[0], 1337);
+  EXPECT_EQ(dscp[1], 31338);
+
+  message_port_->clear();
+  ReceiverConstraints constraints2;
+  constraints2.enable_dscp = false;
+  SetUpWithConstraints(std::move(constraints2));
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _));
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+  message_port_->ReceiveMessage(kValidOfferMessage);  // Re-send offer message
+  const std::vector<std::string>& messages2 = message_port_->posted_messages();
+  ASSERT_EQ(1u, messages2.size());
+  message = ExpectIsValidAnswer(messages2[0]);
+  const Json::Value& answer2 = message["answer"];
+  ASSERT_TRUE(answer2.isObject());
+  const Json::Value& dscp2 = answer2["receiverRtcpDscp"];
+  ASSERT_TRUE(dscp2.empty());
+}
+
+TEST_F(ReceiverSessionTest, InputEventsOptIn) {
+  ReceiverConstraints constraints;
+  constraints.supports_input_events = true;
+  SetUpWithConstraints(std::move(constraints));
+
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _))
+      .WillOnce([](const ReceiverSession* session,
+                   ReceiverSession::ConfiguredReceivers cr) {
+        EXPECT_TRUE(cr.input_enabled);
+      });
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+
+  message_port_->ReceiveMessage(kValidOfferMessageWithInput);
+
+  const std::vector<std::string>& messages = message_port_->posted_messages();
+  ASSERT_EQ(1u, messages.size());
+  Json::Value message = ExpectIsValidAnswer(messages[0]);
+  const Json::Value& answer = message["answer"];
+  const Json::Value& extensions = answer["rtpExtensions"];
+  EXPECT_TRUE(
+      std::ranges::any_of(extensions, [](const Json::Value& stream_extensions) {
+        return Contains(stream_extensions, kInputEventsRtpExtension);
+      }));
+}
+
+TEST_F(ReceiverSessionTest, HandlesInputMessage) {
+  ReceiverConstraints constraints;
+  constraints.supports_input_events = true;
+  SetUpWithConstraints(std::move(constraints));
+
+  message_port_->ReceiveMessage(kInputMessage);
+  // Nothing should happen yet, the session doesn't have a messenger.
+  ASSERT_EQ(0u, message_port_->posted_messages().size());
+
+  InSequence s;
+  bool received_negotiation = false;
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _))
+      .WillOnce([&received_negotiation](
+                    const ReceiverSession* session,
+                    ReceiverSession::ConfiguredReceivers receivers) mutable {
+        ASSERT_TRUE(receivers.input_enabled);
+        received_negotiation = true;
+      });
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+
+  message_port_->ReceiveMessage(kValidOfferMessageWithInput);
+  ASSERT_TRUE(received_negotiation);
+}
+
+TEST_F(ReceiverSessionTest, HandlesInputMessengerNotNegotiated) {
+  ReceiverConstraints constraints;
+  constraints.supports_input_events = false;
+  SetUpWithConstraints(std::move(constraints));
+
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _))
+      .WillOnce([](const ReceiverSession* session,
+                   ReceiverSession::ConfiguredReceivers cr) {
+        EXPECT_FALSE(cr.input_enabled);
+      });
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+
+  message_port_->ReceiveMessage(kValidOfferMessageWithInput);
+}
+
+TEST_F(ReceiverSessionTest, HandlesInputMessengerSendsMessage) {
+  ReceiverConstraints constraints;
+  constraints.supports_input_events = true;
+  SetUpWithConstraints(std::move(constraints));
+
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _))
+      .WillOnce([this](const ReceiverSession* session,
+                       ReceiverSession::ConfiguredReceivers cr) {
+        ASSERT_TRUE(cr.input_enabled);
+
+        InputMessage message;
+        auto* event = message.add_events();
+        event->set_type(InputMessage::INPUT_TYPE_KEY_DOWN);
+        this->session_->SendInputMessage(message);
+      });
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+
+  message_port_->ReceiveMessage(kValidOfferMessageWithInput);
+
+  // Verify message was sent through message port.
+  const auto& messages = message_port_->posted_messages();
+
+  // We expect at least 2 messages: ANSWER and INPUT.
+  ASSERT_GE(messages.size(), 2u);
+
+  // Index 0 is ANSWER.
+  ExpectIsValidAnswer(messages[0]);
+
+  // Index 1 should be INPUT.
+  ErrorOr<Json::Value> input_json = json::Parse(messages[1]);
+  ASSERT_TRUE(input_json.is_value());
+  EXPECT_EQ("INPUT", input_json.value()["type"].asString());
+  EXPECT_FALSE(input_json.value()["input"].asString().empty());
+}
+
+TEST_F(ReceiverSessionTest, HandlesInputMessengerReceivesMessage) {
+  ReceiverConstraints constraints;
+  constraints.supports_input_events = true;
+  SetUpWithConstraints(std::move(constraints));
+
+  bool received_input = false;
+  session_->SetInputCallback(
+      [&received_input](InputMessage message) { received_input = true; });
+
+  EXPECT_CALL(client_, OnNegotiated(session_.get(), _))
+      .WillOnce([](const ReceiverSession* session,
+                   ReceiverSession::ConfiguredReceivers cr) {
+        ASSERT_TRUE(cr.input_enabled);
+      });
+
+  message_port_->ReceiveMessage(kValidOfferMessageWithInput);
+
+  message_port_->ReceiveMessage(kInputMessage);
+  ASSERT_TRUE(received_input);
+
+  EXPECT_CALL(client_,
+              OnReceiversDestroying(session_.get(),
+                                    ReceiverSession::Client::kEndOfSession));
+}
+
+TEST_F(ReceiverSessionTest, UnsubscribesFromEnvironmentOnDestruction) {
+  session_.reset();
+  environment_->SetSocketStateForTesting(Environment::SocketState::kReady);
 }
 
 }  // namespace openscreen::cast

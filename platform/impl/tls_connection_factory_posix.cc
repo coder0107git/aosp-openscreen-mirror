@@ -36,6 +36,9 @@ namespace {
 
 ErrorOr<std::vector<uint8_t>> GetDEREncodedPeerCertificate(const SSL& ssl) {
   X509* const peer_cert = SSL_get_peer_certificate(&ssl);
+  if (!peer_cert) {
+    return Error::Code::kErrCertsMissing;
+  }
   ErrorOr<std::vector<uint8_t>> der_peer_cert =
       ExportX509CertificateToDer(*peer_cert);
   X509_free(peer_cert);
@@ -54,13 +57,15 @@ std::unique_ptr<TlsConnectionFactory> TlsConnectionFactory::CreateFactory(
 TlsConnectionFactoryPosix::TlsConnectionFactoryPosix(
     Client& client,
     TaskRunner& task_runner,
-    PlatformClientPosix* platform_client)
+    PlatformClientPosix* platform_client,
+    ClockNowFunctionPtr now_function)
     : client_(client),
       task_runner_(task_runner),
-      platform_client_(platform_client) {}
+      platform_client_(platform_client),
+      now_function_(now_function) {}
 
 TlsConnectionFactoryPosix::~TlsConnectionFactoryPosix() {
-  OSP_CHECK(task_runner_.IsRunningOnTaskRunner());
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   if (platform_client_) {
     platform_client_->tls_data_router()->DeregisterAcceptObserver(this);
   }
@@ -70,12 +75,12 @@ TlsConnectionFactoryPosix::~TlsConnectionFactoryPosix() {
 // TODO(issuetracker.google.com/281741213): Integrate with Auth.
 void TlsConnectionFactoryPosix::Connect(const IPEndpoint& remote_address,
                                         const TlsConnectOptions& options) {
-  OSP_CHECK(task_runner_.IsRunningOnTaskRunner());
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   TRACE_SCOPED1(TraceCategory::kSsl, "TlsConnectionFactoryPosix::Connect",
                 "remote_address", remote_address.ToString());
   IPAddress::Version version = remote_address.address.version();
   std::unique_ptr<TlsConnectionPosix> connection(
-      new TlsConnectionPosix(version, task_runner_));
+      new TlsConnectionPosix(version, *task_runner_));
   Error connect_error = connection->socket_->Connect(remote_address);
   if (!connect_error.ok()) {
     TRACE_SET_RESULT(connect_error);
@@ -86,6 +91,8 @@ void TlsConnectionFactoryPosix::Connect(const IPEndpoint& remote_address,
   if (!ConfigureSsl(connection.get())) {
     return;
   }
+
+  LookupAndSetupSession(remote_address, connection->ssl_.get());
 
   if (options.unsafely_skip_certificate_validation) {
     // Verifies the server certificate but does not make errors fatal.
@@ -100,7 +107,7 @@ void TlsConnectionFactoryPosix::Connect(const IPEndpoint& remote_address,
 
 void TlsConnectionFactoryPosix::SetListenCredentials(
     const TlsCredentials& credentials) {
-  OSP_CHECK(task_runner_.IsRunningOnTaskRunner());
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   EnsureInitialized();
 
   ErrorOr<bssl::UniquePtr<X509>> cert = ImportCertificate(
@@ -122,7 +129,7 @@ void TlsConnectionFactoryPosix::SetListenCredentials(
 
 void TlsConnectionFactoryPosix::Listen(const IPEndpoint& local_address,
                                        const TlsListenOptions& options) {
-  OSP_CHECK(task_runner_.IsRunningOnTaskRunner());
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
   // Credentials must be set before Listen() is called.
   OSP_CHECK(listen_credentials_set_);
 
@@ -143,9 +150,9 @@ void TlsConnectionFactoryPosix::Listen(const IPEndpoint& local_address,
 }
 
 void TlsConnectionFactoryPosix::OnConnectionPending(StreamSocketPosix* socket) {
-  task_runner_.PostTask([connection_factory_weak_ptr =
-                             weak_factory_.GetWeakPtr(),
-                         socket_weak_ptr = socket->GetWeakPtr()] {
+  task_runner_->PostTask([connection_factory_weak_ptr =
+                              weak_factory_.GetWeakPtr(),
+                          socket_weak_ptr = socket->GetWeakPtr()] {
     if (!connection_factory_weak_ptr || !socket_weak_ptr) {
       // Cancel the Accept() since either the factory or the listener socket
       // went away before this task has run.
@@ -170,12 +177,12 @@ void TlsConnectionFactoryPosix::OnConnectionPending(StreamSocketPosix* socket) {
 
 void TlsConnectionFactoryPosix::OnSocketAccepted(
     std::unique_ptr<StreamSocket> socket) {
-  OSP_CHECK(task_runner_.IsRunningOnTaskRunner());
+  OSP_CHECK(task_runner_->IsRunningOnTaskRunner());
 
   TRACE_SCOPED(TraceCategory::kSsl,
                "TlsConnectionFactoryPosix::OnSocketAccepted");
   std::unique_ptr<TlsConnectionPosix> connection(
-      new TlsConnectionPosix(std::move(socket), task_runner_));
+      new TlsConnectionPosix(std::move(socket), *task_runner_));
 
   if (!ConfigureSsl(connection.get())) {
     return;
@@ -229,6 +236,10 @@ void TlsConnectionFactoryPosix::Initialize() {
   }
 
   SSL_CTX_set_mode(context, SSL_MODE_ENABLE_PARTIAL_WRITE);
+  SSL_CTX_set_session_cache_mode(context, SSL_SESS_CACHE_SERVER);
+  constexpr uint8_t kSessionIdContext[] = "OpenScreenTlsFactory";
+  SSL_CTX_set_session_id_context(context, kSessionIdContext,
+                                 sizeof(kSessionIdContext));
 
   ssl_context_.reset(context);
 }
@@ -244,8 +255,8 @@ void TlsConnectionFactoryPosix::Connect(
   if (connection_status != 1) {
     Error error = GetSSLError(connection->ssl_.get(), connection_status);
     if (error.code() == Error::Code::kAgain) {
-      task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr(),
-                             conn = std::move(connection)]() mutable {
+      task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr(),
+                              conn = std::move(connection)]() mutable {
         if (auto* self = weak_this.get()) {
           self->Connect(std::move(conn));
         }
@@ -253,10 +264,21 @@ void TlsConnectionFactoryPosix::Connect(
       return;
     } else {
       OSP_DVLOG << "SSL_connect failed with error: " << error;
-      DispatchConnectionFailed(connection->GetRemoteEndpoint());
+      IPEndpoint remote = connection->GetRemoteEndpoint();
+      auto it = sessions_.find(remote);
+      if (it != sessions_.end()) {
+        sessions_.erase(it);
+      }
+      DispatchConnectionFailed(remote);
       TRACE_SET_RESULT(error);
       return;
     }
+  }
+
+  SSL_SESSION* session = SSL_get1_session(connection->ssl_.get());
+  if (session != nullptr) {
+    SaveSession(connection->GetRemoteEndpoint(),
+                bssl::UniquePtr<SSL_SESSION>(session));
   }
 
   ErrorOr<std::vector<uint8_t>> der_peer_cert =
@@ -268,12 +290,12 @@ void TlsConnectionFactoryPosix::Connect(
   }
 
   connection->RegisterConnectionWithDataRouter(platform_client_);
-  task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr(),
-                         der = std::move(der_peer_cert.value()),
-                         moved_connection = std::move(connection)]() mutable {
+  task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr(),
+                          der = std::move(der_peer_cert.value()),
+                          moved_connection = std::move(connection)]() mutable {
     if (auto* self = weak_this.get()) {
-      self->client_.OnConnected(self, std::move(der),
-                                std::move(moved_connection));
+      self->client_->OnConnected(self, std::move(der),
+                                 std::move(moved_connection));
     }
   });
 }
@@ -290,8 +312,8 @@ void TlsConnectionFactoryPosix::Accept(
   if (connection_status != 1) {
     Error error = GetSSLError(connection->ssl_.get(), connection_status);
     if (error.code() == Error::Code::kAgain) {
-      task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr(),
-                             conn = std::move(connection)]() mutable {
+      task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr(),
+                              conn = std::move(connection)]() mutable {
         if (auto* self = weak_this.get()) {
           self->Accept(std::move(conn));
         }
@@ -312,31 +334,82 @@ void TlsConnectionFactoryPosix::Accept(
     der_peer_cert_value = std::move(der_peer_cert.value());
   }
   connection->RegisterConnectionWithDataRouter(platform_client_);
-  task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr(),
-                         der = std::move(der_peer_cert_value),
-                         moved_connection = std::move(connection)]() mutable {
+  task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr(),
+                          der = std::move(der_peer_cert_value),
+                          moved_connection = std::move(connection)]() mutable {
     if (auto* self = weak_this.get()) {
-      self->client_.OnAccepted(self, std::move(der),
-                               std::move(moved_connection));
+      self->client_->OnAccepted(self, std::move(der),
+                                std::move(moved_connection));
     }
   });
 }
 
+bool TlsConnectionFactoryPosix::LookupAndSetupSession(
+    const IPEndpoint& remote_address,
+    SSL* ssl) {
+  auto it = sessions_.find(remote_address);
+  if (it == sessions_.end()) {
+    return false;
+  }
+  if (now_function_() >= it->second.absolute_expiry) {
+    sessions_.erase(it);
+    return false;
+  }
+  SSL_set_session(ssl, it->second.session.get());
+  sessions_.erase(it);
+  return true;
+}
+
+void TlsConnectionFactoryPosix::SaveSession(
+    const IPEndpoint& remote,
+    bssl::UniquePtr<SSL_SESSION> session) {
+  Clock::time_point absolute_expiry =
+      now_function_() +
+      std::chrono::seconds(SSL_SESSION_get_timeout(session.get()));
+
+  CleanupExpired();
+
+  auto it = sessions_.find(remote);
+  if (it != sessions_.end()) {
+    it->second = SessionCacheEntry(std::move(session), absolute_expiry);
+    auto kv_pair = std::move(*it);
+    sessions_.erase(it);
+    sessions_.push_back(std::move(kv_pair));
+  } else {
+    if (sessions_.size() >= kSslSessionCacheSize) {
+      sessions_.erase(sessions_.begin());
+    }
+    sessions_.push_back(std::make_pair(
+        remote, SessionCacheEntry(std::move(session), absolute_expiry)));
+  }
+}
+
+void TlsConnectionFactoryPosix::CleanupExpired() {
+  const auto now = now_function_();
+  for (auto it = sessions_.begin(); it != sessions_.end();) {
+    if (now >= it->second.absolute_expiry) {
+      it = sessions_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 void TlsConnectionFactoryPosix::DispatchConnectionFailed(
     const IPEndpoint& remote_endpoint) {
-  task_runner_.PostTask(
+  task_runner_->PostTask(
       [weak_this = weak_factory_.GetWeakPtr(), remote = remote_endpoint] {
         if (auto* self = weak_this.get()) {
-          self->client_.OnConnectionFailed(self, remote);
+          self->client_->OnConnectionFailed(self, remote);
         }
       });
 }
 
 void TlsConnectionFactoryPosix::DispatchError(Error error) {
-  task_runner_.PostTask([weak_this = weak_factory_.GetWeakPtr(),
-                         moved_error = std::move(error)]() mutable {
+  task_runner_->PostTask([weak_this = weak_factory_.GetWeakPtr(),
+                          moved_error = std::move(error)]() mutable {
     if (auto* self = weak_this.get()) {
-      self->client_.OnError(self, std::move(moved_error));
+      self->client_->OnError(self, std::move(moved_error));
     }
   });
 }

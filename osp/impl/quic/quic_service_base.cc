@@ -10,8 +10,9 @@ namespace openscreen::osp {
 
 // static
 QuicAgentCertificate& QuicServiceBase::GetAgentCertificate() {
-  static QuicAgentCertificate agent_certificate;
-  return agent_certificate;
+  static QuicAgentCertificate* const agent_certificate =
+      new QuicAgentCertificate();
+  return *agent_certificate;
 }
 
 QuicServiceBase::QuicServiceBase(
@@ -75,7 +76,7 @@ void QuicServiceBase::OnIncomingStream(uint64_t instance_id,
 
   std::unique_ptr<QuicProtocolConnection> connection =
       connection_entry->second.stream_manager->OnIncomingStream(stream);
-  observer_.OnIncomingConnection(std::move(connection));
+  observer_->OnIncomingConnection(std::move(connection));
 }
 
 void QuicServiceBase::OnConnectionClosed(std::string_view instance_name) {
@@ -111,7 +112,7 @@ QuicStream::Delegate& QuicServiceBase::GetStreamDelegate(uint64_t instance_id) {
 
 void QuicServiceBase::OnClientCertificates(
     std::string_view instance_name,
-    const std::vector<std::string>& certs) {
+    const std::vector<std::string_view>& certs) {
   OSP_NOTREACHED();
 }
 
@@ -168,7 +169,7 @@ bool QuicServiceBase::StartImpl() {
   }
 
   state_ = ProtocolConnectionEndpoint::State::kRunning;
-  observer_.OnRunning();
+  observer_->OnRunning();
   return true;
 }
 
@@ -180,7 +181,7 @@ bool QuicServiceBase::StopImpl() {
 
   CloseAllConnections();
   state_ = ProtocolConnectionEndpoint::State::kStopped;
-  observer_.OnStopped();
+  observer_->OnStopped();
   return true;
 }
 
@@ -191,7 +192,7 @@ bool QuicServiceBase::SuspendImpl() {
   }
 
   state_ = ProtocolConnectionEndpoint::State::kSuspended;
-  observer_.OnSuspended();
+  observer_->OnSuspended();
   return true;
 }
 
@@ -201,7 +202,7 @@ bool QuicServiceBase::ResumeImpl() {
   }
 
   state_ = ProtocolConnectionEndpoint::State::kRunning;
-  observer_.OnRunning();
+  observer_->OnRunning();
   return true;
 }
 
@@ -240,7 +241,7 @@ void QuicServiceBase::CloseAllConnections() {
 void QuicServiceBase::ScheduleCleanup(std::string_view instance_name) {
   constexpr Clock::duration kQuicCleanupDelay = std::chrono::milliseconds(500);
   auto result = cleanup_alarms_.emplace(
-      instance_name, std::make_unique<Alarm>(now_function_, task_runner_));
+      instance_name, std::make_unique<Alarm>(now_function_, *task_runner_));
   if (result.second) {
     result.first->second->ScheduleFromNow(
         [this, instance_name] { Cleanup(instance_name); }, kQuicCleanupDelay);
